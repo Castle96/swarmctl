@@ -1,6 +1,7 @@
 use tabled::Tabled;
+use serde::Serialize;
 
-#[derive(Tabled)]
+#[derive(Tabled, Serialize)]
 pub struct NodeRow {
     pub id: String,
     pub hostname: String,

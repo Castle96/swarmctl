@@ -1,3 +1,9 @@
 pub mod root;
 pub mod node;
 pub mod service;
+pub mod get;
+pub mod describe;
+pub mod create;
+pub mod delete;
+pub mod logs;
+pub mod scale;
