@@ -20,7 +20,7 @@ pub async fn run(
 async fn logs_service(client: &DockerClient, name: String, follow: bool, tail: i64) -> anyhow::Result<()> {
     // Find the service
     let services = crate::api::service::list_services(client.inner()).await?;
-    let service = services.into_iter()
+    let _service = services.into_iter()
         .find(|s| s.spec.as_ref().and_then(|spec| spec.name.as_ref()) == Some(&name))
         .ok_or_else(|| anyhow::anyhow!("Service {} not found", name))?;
 

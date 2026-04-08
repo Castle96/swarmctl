@@ -1,7 +1,7 @@
 use crate::api::client::DockerClient;
 use crate::cli::root::{OutputFormat, ResourceType};
 use crate::utils::printer::{print_table, print_json, print_yaml};
-use crate::models::{node::NodeRow, service::ServiceRow, task::TaskRow, network::NetworkRow};
+use crate::models::{node::NodeRow, service::ServiceRow, network::NetworkRow};
 
 pub async fn run(
     client: &DockerClient,

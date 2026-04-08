@@ -1,7 +1,7 @@
 use crate::api::client::DockerClient;
 use crate::cli::root::OutputFormat;
-use crate::models::port::{PortRow, ServicePortInfo};
-use crate::utils::printer::{print_table, print_json, print_yaml};
+use crate::models::port::ServicePortInfo;
+use crate::utils::printer::{print_json, print_yaml};
 use crate::api::port::{list_used_ports, list_service_ports, get_available_ports, get_port_summary};
 use anyhow::Result;
 

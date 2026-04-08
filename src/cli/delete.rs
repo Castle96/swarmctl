@@ -24,13 +24,13 @@ async fn delete_service(
     client: &DockerClient,
     name: Option<String>,
     selector: Option<String>,
-    force: bool,
+    _force: bool,
 ) -> anyhow::Result<()> {
     if let Some(name) = name {
         println!("Deleting service {}...", name);
         client.inner().delete_service(&name).await?;
         println!("Service {} deleted", name);
-    } else if let Some(selector) = selector {
+    } else if let Some(_selector) = selector {
         // TODO: Implement selector-based deletion
         return Err(anyhow::anyhow!("Selector-based deletion not yet implemented"));
     } else {
@@ -44,13 +44,13 @@ async fn delete_network(
     client: &DockerClient,
     name: Option<String>,
     selector: Option<String>,
-    force: bool,
+    _force: bool,
 ) -> anyhow::Result<()> {
     if let Some(name) = name {
         println!("Deleting network {}...", name);
         client.inner().remove_network(&name).await?;
         println!("Network {} deleted", name);
-    } else if let Some(selector) = selector {
+    } else if let Some(_selector) = selector {
         return Err(anyhow::anyhow!("Selector-based deletion not yet implemented"));
     } else {
         return Err(anyhow::anyhow!("Must specify network name or selector"));
@@ -63,13 +63,13 @@ async fn delete_secret(
     client: &DockerClient,
     name: Option<String>,
     selector: Option<String>,
-    force: bool,
+    _force: bool,
 ) -> anyhow::Result<()> {
     if let Some(name) = name {
         println!("Deleting secret {}...", name);
         client.inner().delete_secret(&name).await?;
         println!("Secret {} deleted", name);
-    } else if let Some(selector) = selector {
+    } else if let Some(_selector) = selector {
         return Err(anyhow::anyhow!("Selector-based deletion not yet implemented"));
     } else {
         return Err(anyhow::anyhow!("Must specify secret name or selector"));
@@ -82,13 +82,13 @@ async fn delete_config(
     client: &DockerClient,
     name: Option<String>,
     selector: Option<String>,
-    force: bool,
+    _force: bool,
 ) -> anyhow::Result<()> {
     if let Some(name) = name {
         println!("Deleting config {}...", name);
         client.inner().delete_config(&name).await?;
         println!("Config {} deleted", name);
-    } else if let Some(selector) = selector {
+    } else if let Some(_selector) = selector {
         return Err(anyhow::anyhow!("Selector-based deletion not yet implemented"));
     } else {
         return Err(anyhow::anyhow!("Must specify config name or selector"));
@@ -98,10 +98,10 @@ async fn delete_config(
 }
 
 async fn delete_task(
-    client: &DockerClient,
+    _client: &DockerClient,
     name: Option<String>,
-    selector: Option<String>,
-    force: bool,
+    _selector: Option<String>,
+    _force: bool,
 ) -> anyhow::Result<()> {
     if let Some(task_id) = name {
         println!("Deleting task {}...", task_id);

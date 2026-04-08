@@ -9,7 +9,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use anyhow::Result;
 use std::io;
 
 pub enum AppState {
@@ -254,7 +253,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     ), chunks[2]);
 }
 
-fn render_services(app: &App) -> List {
+fn render_services(app: &App) -> List<'_> {
     let items: Vec<ListItem> = app.services.iter().map(|s| {
         ListItem::new(format!(
             "{:12} {:30} {:12} {:10} {}",
@@ -270,7 +269,7 @@ fn render_services(app: &App) -> List {
         .block(Block::default().borders(Borders::ALL).title(format!("Services ({})", app.services.len())))
 }
 
-fn render_nodes(app: &App) -> List {
+fn render_nodes(app: &App) -> List<'_> {
     let items: Vec<ListItem> = app.nodes.iter().map(|n| {
         ListItem::new(format!(
             "{:12} {:20} {:15} {:10} {}",
@@ -286,7 +285,7 @@ fn render_nodes(app: &App) -> List {
         .block(Block::default().borders(Borders::ALL).title(format!("Nodes ({})", app.nodes.len())))
 }
 
-fn render_networks(app: &App) -> List {
+fn render_networks(app: &App) -> List<'_> {
     let items: Vec<ListItem> = app.networks.iter().map(|n| {
         ListItem::new(format!(
             "{:12} {:30} {:12} {:10} {}",
@@ -302,7 +301,7 @@ fn render_networks(app: &App) -> List {
         .block(Block::default().borders(Borders::ALL).title(format!("Networks ({})", app.networks.len())))
 }
 
-fn render_ports(app: &App) -> List {
+fn render_ports(app: &App) -> List<'_> {
     let summary = app.ports.first();
     
     let items: Vec<ListItem> = if let Some(s) = summary {
@@ -323,7 +322,7 @@ fn render_ports(app: &App) -> List {
         .block(Block::default().borders(Borders::ALL).title("Port Mappings"))
 }
 
-fn render_secrets(app: &App) -> List {
+fn render_secrets(app: &App) -> List<'_> {
     let items: Vec<ListItem> = app.secrets.iter().map(|s| {
         ListItem::new(format!(
             "{:12} {}",
@@ -336,7 +335,7 @@ fn render_secrets(app: &App) -> List {
         .block(Block::default().borders(Borders::ALL).title(format!("Secrets ({})", app.secrets.len())))
 }
 
-fn render_tasks(app: &App) -> List {
+fn render_tasks(app: &App) -> List<'_> {
     let items: Vec<ListItem> = app.tasks.iter().map(|t| {
         ListItem::new(format!(
             "{:12} {:30} {:15} {:12}",

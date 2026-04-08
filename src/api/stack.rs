@@ -1,5 +1,4 @@
 use bollard::Docker;
-use bollard::query_parameters::ListServicesOptions;
 
 #[allow(dead_code)]
 pub async fn list_stacks(_docker: &Docker) -> anyhow::Result<Vec<StackSummary>> {
