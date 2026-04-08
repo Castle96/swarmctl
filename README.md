@@ -8,12 +8,54 @@ This project is intended for DevOps workflows, homelab environments, and automat
 
 ## Features
 
-* List swarm nodes
-* List swarm services
-* Clean, table-based output
-* Modular architecture for future expansion
+* List swarm nodes, services, tasks, networks, secrets, configs, and stacks
+* Clean, table-based output with ANSI color support
+* JSON and YAML output formats
+* **Interactive TUI Dashboard** - Real-time monitoring with keyboard navigation
+* **Port Scanner** - Visualize and manage container port mappings
+* **Cluster Information** - View swarm configuration and raft settings
 * Native async Rust implementation using Tokio
 * Direct integration with Docker API via Bollard
+
+---
+
+## Quick Start
+
+### Build
+
+```bash
+# Install Rust first
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Build
+cargo build --release
+
+# Or use Docker
+make build-docker
+```
+
+### Run
+
+```bash
+# TUI Dashboard
+./target/release/swarmctl dashboard
+
+# List resources
+./target/release/swarmctl get services
+./target/release/swarmctl get nodes
+
+# Port scanner
+./target/release/swarmctl ports --tui
+
+# Cluster info
+./target/release/swarmctl cluster-info
+```
+
+---
+
+## Documentation
+
+For detailed build instructions and usage, see [BUILD.md](./BUILD.md).
 
 ---
 
@@ -22,29 +64,50 @@ This project is intended for DevOps workflows, homelab environments, and automat
 ```
 swarmctl/
 ├── Cargo.toml
+├── Makefile
+├── BUILD.md           # Detailed build and usage guide
+├── README.md
 └── src/
     ├── main.rs
     │
-    ├── api/                  # Docker API layer
-    │   ├── mod.rs
-    │   ├── client.rs         # Docker client wrapper
-    │   ├── node.rs           # Node API calls
-    │   └── service.rs        # Service API calls
-    │
-    ├── cli/                  # CLI commands
-    │   ├── mod.rs
-    │   ├── root.rs           # Command routing
-    │   ├── node.rs           # Node CLI logic
-    │   └── service.rs        # Service CLI logic
-    │
-    ├── models/               # Output models
-    │   ├── mod.rs
+    ├── api/              # Docker API layer
+    │   ├── client.rs
     │   ├── node.rs
-    │   └── service.rs
+    │   ├── service.rs
+    │   ├── task.rs
+    │   ├── network.rs
+    │   ├── secret.rs
+    │   ├── config.rs
+    │   ├── stack.rs
+    │   ├── swarm.rs
+    │   └── port.rs
     │
-    └── utils/                # Shared utilities
-        ├── mod.rs
-        └── printer.rs        # Table formatting
+    ├── cli/              # CLI commands
+    │   ├── root.rs
+    │   ├── get.rs
+    │   ├── describe.rs
+    │   ├── create.rs
+    │   ├── delete.rs
+    │   ├── scale.rs
+    │   ├── logs.rs
+    │   ├── ports.rs
+    │   └── cluster.rs
+    │
+    ├── models/           # Output models
+    │   ├── node.rs
+    │   ├── service.rs
+    │   ├── task.rs
+    │   ├── network.rs
+    │   ├── secret.rs
+    │   ├── config.rs
+    │   ├── stack.rs
+    │   └── port.rs
+    │
+    ├── tui/              # TUI Dashboard
+    │   └── mod.rs
+    │
+    └── utils/            # Shared utilities
+        └── printer.rs
 ```
 
 ---
@@ -59,14 +122,19 @@ swarmctl/
 
 ### Build
 
-```
+```bash
 cargo build --release
 ```
 
 ### Run
 
-```
-cargo run -- node list
+```bash
+# Using Make
+make build-release
+make run
+
+# Direct
+./target/release/swarmctl --help
 ```
 
 ---
@@ -77,19 +145,19 @@ cargo run -- node list
 
 ### Local Docker socket
 
-```
+```bash
 export DOCKER_HOST=unix:///var/run/docker.sock
 ```
 
 ### Remote Docker daemon (TCP)
 
-```
+```bash
 export DOCKER_HOST=tcp://<manager-ip>:2375
 ```
 
 Example:
 
-```
+```bash
 export DOCKER_HOST=tcp://192.168.5.65:2375
 ```
 
@@ -107,7 +175,7 @@ Edit or create:
 
 Add:
 
-```
+```ini
 [Service]
 ExecStart=
 ExecStart=/usr/bin/dockerd -H unix:///var/run/docker.sock -H tcp://0.0.0.0:2375
@@ -115,14 +183,14 @@ ExecStart=/usr/bin/dockerd -H unix:///var/run/docker.sock -H tcp://0.0.0.0:2375
 
 Then reload and restart Docker:
 
-```
+```bash
 sudo systemctl daemon-reexec
 sudo systemctl restart docker
 ```
 
 Verify:
 
-```
+```bash
 ss -lntp | grep dockerd
 ```
 
@@ -141,37 +209,74 @@ Recommended approaches:
 
 ---
 
-## Usage
+## Usage Examples
 
-### List Nodes
+### TUI Dashboard
 
-```
-swarmctl node list
-```
-
-Displays:
-
-* Node ID
-* Hostname
-* Status
-* Availability
-* Manager reachability
-
----
-
-### List Services
-
-```
-swarmctl service list
+```bash
+swarmctl dashboard
 ```
 
-Displays:
+Navigate with Tab, 1-6 keys, j/k for scrolling, r to refresh.
 
-* Service ID
-* Name
-* Mode (replicated/global)
-* Replica count
-* Container image
+### Port Scanner
+
+```bash
+# List all port mappings
+swarmctl ports
+
+# TUI visualization
+swarmctl ports --tui
+
+# Show available ports
+swarmctl ports --available
+
+# Filter by protocol
+swarmctl ports --protocol tcp
+swarmctl ports --protocol udp
+
+# Custom port range
+swarmctl ports --range-start 30000 --range-end 40000
+```
+
+### List Resources
+
+```bash
+swarmctl get services
+swarmctl get nodes
+swarmctl get tasks
+swarmctl get networks
+swarmctl get secrets
+swarmctl get configs
+swarmctl get stacks
+```
+
+### Output Formats
+
+```bash
+# Table (default)
+swarmctl get services
+
+# JSON
+swarmctl get services -o json
+
+# YAML
+swarmctl get services -o yaml
+```
+
+### Describe Resources
+
+```bash
+swarmctl describe services my-service
+swarmctl describe nodes node1
+swarmctl describe networks my-network
+```
+
+### Cluster Info
+
+```bash
+swarmctl cluster-info
+```
 
 ---
 
@@ -181,11 +286,10 @@ Displays:
 
 ### API Layer
 
-Handles communication with Docker using Bollard. This layer is responsible for:
-
-* Fetching nodes
-* Fetching services
-* Future: scaling, updates, logs
+Handles communication with Docker using Bollard. Responsible for:
+- Fetching nodes, services, tasks, networks, secrets, configs
+- Port scanning and analysis
+- Swarm cluster information
 
 ### CLI Layer
 
@@ -195,9 +299,13 @@ Handles user interaction and command parsing via Clap.
 
 Defines clean, display-ready structs separate from Docker's raw API objects.
 
+### TUI Layer
+
+Interactive terminal dashboard using ratatui for real-time monitoring.
+
 ### Utilities
 
-Shared helpers such as table rendering.
+Shared helpers such as table rendering and JSON/YAML serialization.
 
 ---
 
@@ -207,6 +315,20 @@ Shared helpers such as table rendering.
 2. Map API results into models
 3. Expose via CLI commands
 4. Format output via utilities
+
+### Makefile Commands
+
+```bash
+make build           # Debug build
+make build-release   # Release build
+make build-docker    # Build in Docker
+make clean           # Clean artifacts
+make test            # Run tests
+make run             # Run debug version
+make install         # Install to ~/.local/bin
+make fmt             # Format code
+make clippy          # Lint code
+```
 
 ---
 
@@ -219,10 +341,9 @@ Cannot connect to the Docker daemon
 ```
 
 Ensure:
-
-* Docker is running
-* `DOCKER_HOST` is set correctly
-* TCP port is exposed if using remote
+- Docker is running
+- `DOCKER_HOST` is set correctly
+- TCP port is exposed if using remote
 
 ---
 
@@ -233,13 +354,8 @@ This node is not a swarm manager
 ```
 
 Ensure:
-
-* You are connected to a manager node
-* Verify with:
-
-```
-docker node ls
-```
+- You are connected to a manager node
+- Verify with: `docker node ls`
 
 ---
 
@@ -247,7 +363,7 @@ docker node ls
 
 Check:
 
-```
+```bash
 docker info | grep Swarm
 ```
 
@@ -263,14 +379,15 @@ Is Manager: true
 ## Roadmap
 
 Planned features:
-
-* Node inspection
-* Service inspection
-* Service scaling
-* Service logs
-* Stack deployment and removal
-* CI/CD integration
-* Remote build and deploy pipelines
+- [x] Node listing and inspection
+- [x] Service listing and inspection
+- [x] Service scaling
+- [x] Service logs
+- [x] Stack deployment and management
+- [x] Port scanner with TUI
+- [x] Cluster information
+- [ ] Remote build and deploy pipelines
+- [ ] CI/CD integration
 
 ---
 
