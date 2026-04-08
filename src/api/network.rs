@@ -1,8 +1,9 @@
 use bollard::Docker;
 
-#[allow(dead_code)]
-pub async fn list_networks(_docker: &Docker) -> anyhow::Result<Vec<bollard::models::Network>> {
-    Ok(Vec::new())
+pub async fn list_networks(docker: &Docker) -> anyhow::Result<Vec<bollard::models::Network>> {
+    Ok(docker
+        .list_networks(None::<bollard::query_parameters::ListNetworksOptions>)
+        .await?)
 }
 
 #[allow(dead_code)]

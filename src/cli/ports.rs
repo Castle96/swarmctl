@@ -120,9 +120,9 @@ fn print_available_ports(available: &[u16], start: u16, end: u16) {
 }
 
 fn style(s: &str, width: usize, fill: char) -> String {
-    let len = s.len();
+    let len = s.chars().count();
     if len >= width {
-        s[..width].to_string()
+        s.chars().take(width).collect()
     } else {
         format!("{}{}", s, fill.to_string().repeat(width - len))
     }
@@ -141,8 +141,8 @@ fn style_port(port: &str, is_published: bool) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max-3])
+    if s.chars().count() > max {
+        format!("{}...", s.chars().take(max-3).collect::<String>())
     } else {
         s.to_string()
     }

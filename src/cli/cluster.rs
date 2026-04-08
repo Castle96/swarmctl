@@ -44,9 +44,9 @@ pub async fn run(client: &DockerClient) -> Result<()> {
 }
 
 fn style(s: &str, width: usize, fill: char) -> String {
-    let len = s.len();
+    let len = s.chars().count();
     if len >= width {
-        s[..width].to_string()
+        s.chars().take(width).collect()
     } else {
         format!("{}{}", s, fill.to_string().repeat(width - len))
     }
