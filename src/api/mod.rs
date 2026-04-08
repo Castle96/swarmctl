@@ -1,3 +1,10 @@
 pub mod client;
 pub mod node;
 pub mod service;
+pub mod port;
+pub mod network;
+pub mod secret;
+pub mod config;
+pub mod swarm;
+pub mod task;
+pub mod stack;

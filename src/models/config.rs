@@ -2,10 +2,8 @@ use tabled::Tabled;
 use serde::Serialize;
 
 #[derive(Tabled, Serialize)]
-pub struct NetworkRow {
+pub struct ConfigRow {
     pub id: String,
     pub name: String,
-    pub driver: String,
-    pub scope: String,
-    pub internal: String,
+    pub created_at: String,
 }

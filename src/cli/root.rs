@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use crate::cli::{get, describe, create, delete, logs, scale};
+use crate::cli::{get, describe, create, delete, logs, scale, ports, cluster};
 use crate::api::client::DockerClient;
 
 #[derive(Parser)]
@@ -118,8 +118,34 @@ enum Commands {
         tail: i64,
     },
 
+    /// List and visualize port mappings on the swarm
+    Ports {
+        /// Enable TUI visualization mode
+        #[arg(short, long)]
+        tui: bool,
+
+        /// Show available ports in the specified range
+        #[arg(short, long)]
+        available: bool,
+
+        /// Start of port range to scan
+        #[arg(long, default_value = "30000")]
+        range_start: Option<u16>,
+
+        /// End of port range to scan
+        #[arg(long, default_value = "40000")]
+        range_end: Option<u16>,
+
+        /// Filter by protocol (tcp or udp)
+        #[arg(short, long)]
+        protocol: Option<String>,
+    },
+
     /// Get cluster info
     ClusterInfo,
+
+    /// Launch interactive TUI dashboard
+    Dashboard,
 
     /// Show version information
     Version,
@@ -166,9 +192,18 @@ impl Cli {
             Commands::Logs { resource, name, follow, tail } => {
                 logs::run(&client, resource, name, follow, tail).await?;
             }
+            Commands::Ports { tui, available, range_start, range_end, protocol } => {
+                if tui {
+                    ports::run_tui(&client).await?;
+                } else {
+                    ports::run(&client, cli.output, available, range_start, range_end, protocol).await?;
+                }
+            }
             Commands::ClusterInfo => {
-                println!("Swarm cluster information:");
-                // TODO: Implement cluster info
+                cluster::run(&client).await?;
+            }
+            Commands::Dashboard => {
+                crate::tui::run_tui(&client).await?;
             }
             Commands::Version => {
                 println!("swarmctl version 0.1.0");

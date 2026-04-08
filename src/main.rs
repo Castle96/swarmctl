@@ -3,6 +3,7 @@ use cli::root::Cli;
 mod api;
 mod cli;
 mod models;
+mod tui;
 mod utils;
 
 #[tokio::main]
