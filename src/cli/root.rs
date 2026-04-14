@@ -1,6 +1,6 @@
-use clap::{Parser, Subcommand, ValueEnum};
-use crate::cli::{get, describe, create, delete, logs, scale, ports, cluster};
 use crate::api::client::DockerClient;
+use crate::cli::{cluster, create, delete, describe, get, logs, ports, scale, stack};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "swarmctl")]
@@ -147,8 +147,34 @@ enum Commands {
     /// Launch interactive TUI dashboard
     Dashboard,
 
+    /// Stack operations
+    Stack {
+        #[command(subcommand)]
+        command: StackCommand,
+    },
+
     /// Show version information
     Version,
+}
+
+#[derive(Subcommand)]
+pub enum StackCommand {
+    /// Deploy a stack from a compose file
+    Deploy {
+        /// Compose file path
+        #[arg(short = 'c', long = "compose-file")]
+        compose_file: String,
+
+        /// Stack name
+        name: String,
+    },
+    /// Remove a stack and its resources
+    Rm {
+        /// Stack name
+        name: String,
+    },
+    /// List stacks
+    Ls,
 }
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -174,29 +200,72 @@ impl Cli {
         let client = DockerClient::new();
 
         match cli.command {
-            Commands::Get { resource, name, show_labels, selector } => {
-                get::run(&client, resource, name, cli.output, show_labels, selector, cli.watch).await?;
+            Commands::Get {
+                resource,
+                name,
+                show_labels,
+                selector,
+            } => {
+                get::run(
+                    &client,
+                    resource,
+                    name,
+                    cli.output,
+                    show_labels,
+                    selector,
+                    cli.watch,
+                )
+                .await?;
             }
             Commands::Describe { resource, name } => {
                 describe::run(&client, resource, name, cli.output).await?;
             }
-            Commands::Create { resource, name, filename, stdin } => {
+            Commands::Create {
+                resource,
+                name,
+                filename,
+                stdin,
+            } => {
                 create::run(&client, resource, name, filename, stdin).await?;
             }
-            Commands::Delete { resource, name, selector, force } => {
+            Commands::Delete {
+                resource,
+                name,
+                selector,
+                force,
+            } => {
                 delete::run(&client, resource, name, selector, force).await?;
             }
             Commands::Scale { name, replicas } => {
                 scale::run(&client, &name, replicas).await?;
             }
-            Commands::Logs { resource, name, follow, tail } => {
+            Commands::Logs {
+                resource,
+                name,
+                follow,
+                tail,
+            } => {
                 logs::run(&client, resource, name, follow, tail).await?;
             }
-            Commands::Ports { tui, available, range_start, range_end, protocol } => {
+            Commands::Ports {
+                tui,
+                available,
+                range_start,
+                range_end,
+                protocol,
+            } => {
                 if tui {
                     ports::run_tui(&client).await?;
                 } else {
-                    ports::run(&client, cli.output, available, range_start, range_end, protocol).await?;
+                    ports::run(
+                        &client,
+                        cli.output,
+                        available,
+                        range_start,
+                        range_end,
+                        protocol,
+                    )
+                    .await?;
                 }
             }
             Commands::ClusterInfo => {
@@ -209,6 +278,17 @@ impl Cli {
                 println!("swarmctl version 0.1.0");
                 println!("Docker API version: {}", bollard::API_DEFAULT_VERSION);
             }
+            Commands::Stack { command } => match command {
+                StackCommand::Deploy { compose_file, name } => {
+                    stack::deploy(&client, compose_file, name).await?;
+                }
+                StackCommand::Rm { name } => {
+                    stack::remove(&client, &name).await?;
+                }
+                StackCommand::Ls => {
+                    stack::list(&client).await?;
+                }
+            },
         }
 
         Ok(())

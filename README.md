@@ -12,8 +12,7 @@ This project is intended for DevOps workflows, homelab environments, and automat
 * Clean, table-based output with ANSI color support
 * JSON and YAML output formats
 * **Interactive TUI Dashboard** - Real-time monitoring with keyboard navigation
-* **Port Scanner** - Visualize and manage container port mappings
-* **Cluster Information** - View swarm configuration and raft settings
+* **Port Scanner** - Visualize and manage container port mappings* Stack deployment and management from Docker Compose files* **Cluster Information** - View swarm configuration and raft settings
 * Native async Rust implementation using Tokio
 * Direct integration with Docker API via Bollard
 
@@ -249,6 +248,19 @@ swarmctl get networks
 swarmctl get secrets
 swarmctl get configs
 swarmctl get stacks
+```
+
+### Stack Management
+
+```bash
+# Deploy a stack from a Compose file
+swarmctl stack deploy -c docker-compose.yml my-stack
+
+# List deployed stacks
+swarmctl stack ls
+
+# Remove a stack and its resources
+swarmctl stack rm my-stack
 ```
 
 ### Output Formats
