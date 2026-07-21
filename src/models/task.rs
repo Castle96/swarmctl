@@ -1,5 +1,5 @@
-use tabled::Tabled;
 use serde::Serialize;
+use tabled::Tabled;
 
 #[derive(Tabled, Serialize)]
 pub struct TaskRow {
@@ -10,4 +10,6 @@ pub struct TaskRow {
     pub image: String,
     pub ports: String,
     pub node: String,
+    #[tabled(skip)]
+    pub labels: String,
 }

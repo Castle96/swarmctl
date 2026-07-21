@@ -1,7 +1,7 @@
-use tabled::{Table, Tabled};
 use serde::Serialize;
+use tabled::{Table, Tabled};
 
-pub fn print_table<T: Tabled>(rows: Vec<T>) {
+pub fn print_table<T: Tabled>(rows: &[T]) {
     let table = Table::new(rows);
     println!("{}", table);
 }

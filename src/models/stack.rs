@@ -1,5 +1,5 @@
-use tabled::Tabled;
 use serde::Serialize;
+use tabled::Tabled;
 
 #[derive(Tabled, Serialize)]
 pub struct StackRow {

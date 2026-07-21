@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-bollard = "0.20"
-clap = { version = "4", features = ["derive"] }
+bollard = { version = "0.20", features = ["ssl", "ssh"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 anyhow = "1"
 tabled = "0.15"
 log = "0.4"
@@ -18,3 +19,4 @@ futures = "0.3"
 base64 = "0.22"
 ratatui = "0.28"
 crossterm = "0.28"
+tempfile = "3"

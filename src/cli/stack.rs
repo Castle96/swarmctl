@@ -464,7 +464,7 @@ fn compose_configs(
     configs.map(|configs| {
         configs
             .iter()
-            .filter_map(|config| {
+            .map(|config| {
                 let (source, target) = match config {
                     ComposeServiceConfig::Name(name) => (name.clone(), None),
                     ComposeServiceConfig::Detailed { source, target } => {
@@ -482,12 +482,12 @@ fn compose_configs(
                     mode: None,
                 });
 
-                Some(TaskSpecContainerSpecConfigs {
+                TaskSpecContainerSpecConfigs {
                     config_id: None,
                     config_name: Some(actual_name),
                     file,
                     runtime: None,
-                })
+                }
             })
             .collect()
     })
@@ -501,7 +501,7 @@ fn compose_secrets(
     secrets.map(|secrets| {
         secrets
             .iter()
-            .filter_map(|secret| {
+            .map(|secret| {
                 let (source, target) = match secret {
                     ComposeServiceSecret::Name(name) => (name.clone(), None),
                     ComposeServiceSecret::Detailed { source, target } => {
@@ -519,11 +519,11 @@ fn compose_secrets(
                     mode: None,
                 });
 
-                Some(TaskSpecContainerSpecSecrets {
+                TaskSpecContainerSpecSecrets {
                     file,
                     secret_id: None,
                     secret_name: Some(actual_name),
-                })
+                }
             })
             .collect()
     })

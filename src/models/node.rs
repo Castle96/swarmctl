@@ -1,5 +1,5 @@
-use tabled::Tabled;
 use serde::Serialize;
+use tabled::Tabled;
 
 #[derive(Tabled, Serialize)]
 pub struct NodeRow {
@@ -8,4 +8,6 @@ pub struct NodeRow {
     pub status: String,
     pub availability: String,
     pub manager: String,
+    #[tabled(skip)]
+    pub labels: String,
 }

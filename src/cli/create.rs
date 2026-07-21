@@ -14,7 +14,12 @@ pub async fn run(
         ResourceType::Networks => create_network(client, name, filename, stdin).await?,
         ResourceType::Secrets => create_secret(client, name, filename, stdin).await?,
         ResourceType::Configs => create_config(client, name, filename, stdin).await?,
-        _ => return Err(anyhow::anyhow!("Creating {} is not yet supported", format!("{:?}", resource).to_lowercase())),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Creating {} is not yet supported",
+                format!("{:?}", resource).to_lowercase()
+            ));
+        }
     }
 
     Ok(())
@@ -46,7 +51,10 @@ async fn create_service(
     }
 
     let response = client.inner().create_service(final_spec, None).await?;
-    println!("Service created with ID: {}", response.id.unwrap_or_default());
+    println!(
+        "Service created with ID: {}",
+        response.id.unwrap_or_default()
+    );
 
     Ok(())
 }

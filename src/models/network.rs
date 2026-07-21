@@ -1,5 +1,5 @@
-use tabled::Tabled;
 use serde::Serialize;
+use tabled::Tabled;
 
 #[derive(Tabled, Serialize)]
 pub struct NetworkRow {
@@ -8,4 +8,6 @@ pub struct NetworkRow {
     pub driver: String,
     pub scope: String,
     pub internal: String,
+    #[tabled(skip)]
+    pub labels: String,
 }

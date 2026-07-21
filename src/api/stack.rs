@@ -10,22 +10,22 @@ pub async fn list_stacks(docker: &Docker) -> anyhow::Result<Vec<StackSummary>> {
 
     let mut stacks: HashMap<String, StackSummary> = HashMap::new();
     for service in services {
-        if let Some(labels) = service.spec.as_ref().and_then(|spec| spec.labels.as_ref()) {
-            if let Some(stack_name) = labels.get("com.docker.stack.namespace") {
-                let entry = stacks
-                    .entry(stack_name.clone())
-                    .or_insert_with(|| StackSummary {
-                        name: stack_name.clone(),
-                        services: 0,
-                        replicas: 0,
-                    });
-                entry.services += 1;
+        if let Some(labels) = service.spec.as_ref().and_then(|spec| spec.labels.as_ref())
+            && let Some(stack_name) = labels.get("com.docker.stack.namespace")
+        {
+            let entry = stacks
+                .entry(stack_name.clone())
+                .or_insert_with(|| StackSummary {
+                    name: stack_name.clone(),
+                    services: 0,
+                    replicas: 0,
+                });
+            entry.services += 1;
 
-                if let Some(mode) = service.spec.as_ref().and_then(|spec| spec.mode.as_ref()) {
-                    if let Some(replicated) = mode.replicated.as_ref() {
-                        entry.replicas += replicated.replicas.unwrap_or(0) as usize;
-                    }
-                }
+            if let Some(mode) = service.spec.as_ref().and_then(|spec| spec.mode.as_ref())
+                && let Some(replicated) = mode.replicated.as_ref()
+            {
+                entry.replicas += replicated.replicas.unwrap_or(0) as usize;
             }
         }
     }

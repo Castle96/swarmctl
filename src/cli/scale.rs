@@ -5,7 +5,8 @@ pub async fn run(client: &DockerClient, name: &str, replicas: u64) -> anyhow::Re
 
     // Find the service
     let services = crate::api::service::list_services(client.inner()).await?;
-    let service = services.into_iter()
+    let service = services
+        .into_iter()
         .find(|s| s.spec.as_ref().and_then(|spec| spec.name.as_ref()) == Some(&name.to_string()))
         .ok_or_else(|| anyhow::anyhow!("Service {} not found", name))?;
 
@@ -16,7 +17,10 @@ pub async fn run(client: &DockerClient, name: &str, replicas: u64) -> anyhow::Re
         if let Some(replicated) = &mut mode.replicated {
             replicated.replicas = Some(replicas as i64);
         } else {
-            return Err(anyhow::anyhow!("Service {} is not in replicated mode", name));
+            return Err(anyhow::anyhow!(
+                "Service {} is not in replicated mode",
+                name
+            ));
         }
     } else {
         return Err(anyhow::anyhow!("Service {} has no mode specified", name));
@@ -28,7 +32,10 @@ pub async fn run(client: &DockerClient, name: &str, replicas: u64) -> anyhow::Re
         ..Default::default()
     };
 
-    client.inner().update_service(&name, spec, options, None).await?;
+    client
+        .inner()
+        .update_service(name, spec, options, None)
+        .await?;
 
     println!("Service {} scaled to {} replicas", name, replicas);
 

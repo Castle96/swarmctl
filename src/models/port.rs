@@ -13,9 +13,11 @@ pub struct PortRow {
 
 impl PartialEq for PortRow {
     fn eq(&self, other: &Self) -> bool {
-        self.port == other.port && self.protocol == other.protocol && 
-        self.service == other.service && self.target_port == other.target_port && 
-        self.publish_mode == other.publish_mode
+        self.port == other.port
+            && self.protocol == other.protocol
+            && self.service == other.service
+            && self.target_port == other.target_port
+            && self.publish_mode == other.publish_mode
     }
 }
 

@@ -17,13 +17,19 @@ help:
 	@echo "Usage:"
 	@echo "  make build-release"
 
-# Build debug version
+# Build debug version and install
 build:
 	cargo build
+	@mkdir -p ~/.local/bin
+	cp ./target/debug/swarmctl ~/.local/bin/swarmctl
+	@echo "Installed to ~/.local/bin/swarmctl"
 
-# Build release version
+# Build release version and install
 build-release:
 	cargo build --release
+	@mkdir -p ~/.local/bin
+	cp ./target/release/swarmctl ~/.local/bin/swarmctl
+	@echo "Installed to ~/.local/bin/swarmctl"
 
 # Build using Docker
 build-docker:
