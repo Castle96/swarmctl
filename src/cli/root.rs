@@ -879,66 +879,90 @@ impl Cli {
     pub async fn run() -> anyhow::Result<()> {
         let cli = Cli::parse();
 
-        let client = if cli.context.is_some() || cli.host.is_some() || cli.tlscacert.is_some() || cli.tlscert.is_some() || cli.tlskey.is_some() {
-            let conn_config = crate::api::client::ConnectionConfig {
-                host: cli.host.clone(),
-                tlscacert: cli.tlscacert.clone(),
-                tlscert: cli.tlscert.clone(),
-                tlskey: cli.tlskey.clone(),
-            };
-            if let Some(ref ctx_name) = cli.context {
-                DockerClient::with_context(Some(ctx_name))?
+        let try_client = || -> anyhow::Result<DockerClient> {
+            if cli.context.is_some() || cli.host.is_some() || cli.tlscacert.is_some() || cli.tlscert.is_some() || cli.tlskey.is_some() {
+                let conn_config = crate::api::client::ConnectionConfig {
+                    host: cli.host.clone(),
+                    tlscacert: cli.tlscacert.clone(),
+                    tlscert: cli.tlscert.clone(),
+                    tlskey: cli.tlskey.clone(),
+                };
+                if let Some(ref ctx_name) = cli.context {
+                    DockerClient::with_context(Some(ctx_name))
+                } else {
+                    DockerClient::with_config(&conn_config)
+                }
             } else {
-                DockerClient::with_config(&conn_config)?
+                DockerClient::with_context(None)
             }
-        } else {
-            DockerClient::with_context(None)?
+        };
+
+        let is_dashboard = matches!(cli.command, Commands::Dashboard);
+        let client = match try_client() {
+            Ok(c) => Some(c),
+            Err(e) if is_dashboard => {
+                eprintln!("Warning: Docker not available ({}). Dashboard will launch in offline mode.", e);
+                None
+            }
+            Err(e) => return Err(e),
         };
 
         if Self::needs_swarm(&cli.command) {
-            if !crate::api::swarm::is_swarm_active(client.inner()).await {
-                println!("No swarm detected on this node.");
-                print!("Would you like to initialize a swarm? [y/N] ");
-                use std::io::Write;
-                std::io::stdout().flush()?;
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                if input.trim().eq_ignore_ascii_case("y") {
-                    let addr = Self::detect_local_ip();
-                    println!("Initializing swarm with advertise address {}...", addr);
-                    let node_id = crate::api::swarm::init_swarm(client.inner(), &addr).await?;
-                    println!("Swarm initialized. Node ID: {}", node_id);
+            if let Some(ref client) = client {
+                if !crate::api::swarm::is_swarm_active(client.inner()).await {
+                    println!("No swarm detected on this node.");
+                    print!("Would you like to initialize a swarm? [y/N] ");
+                    use std::io::Write;
+                    std::io::stdout().flush()?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    if input.trim().eq_ignore_ascii_case("y") {
+                        let addr = Self::detect_local_ip();
+                        println!("Initializing swarm with advertise address {}...", addr);
+                        let node_id = crate::api::swarm::init_swarm(client.inner(), &addr).await?;
+                        println!("Swarm initialized. Node ID: {}", node_id);
 
-                    let tokens = crate::api::swarm::get_join_tokens(client.inner()).await?;
+                        let tokens = crate::api::swarm::get_join_tokens(client.inner()).await?;
 
-                    match rpassword::prompt_password("Vault password (to save tokens, or empty to skip): ") {
-                        Ok(vault_password) if !vault_password.is_empty() => {
-                            let vault = if crate::vault::LocalVault::exists() {
-                                crate::vault::LocalVault::open(&vault_password)?
-                            } else {
-                                crate::vault::LocalVault::create(&vault_password)?
-                            };
-                            let mut vault = vault;
-                            let host = std::env::var("DOCKER_HOST")
-                                .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
-                            let swarm_name = client.inner().info().await
-                                .ok()
-                                .and_then(|i| i.name)
-                                .unwrap_or_else(|| "docker".to_string());
-                            vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
-                            println!("Tokens saved to vault.");
+                        match rpassword::prompt_password("Vault password (to save tokens, or empty to skip): ") {
+                            Ok(vault_password) if !vault_password.is_empty() => {
+                                let vault = if crate::vault::LocalVault::exists() {
+                                    crate::vault::LocalVault::open(&vault_password)?
+                                } else {
+                                    crate::vault::LocalVault::create(&vault_password)?
+                                };
+                                let mut vault = vault;
+                                let host = std::env::var("DOCKER_HOST")
+                                    .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
+                                let swarm_name = client.inner().info().await
+                                    .ok()
+                                    .and_then(|i| i.name)
+                                    .unwrap_or_else(|| "docker".to_string());
+                                vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
+                                println!("Tokens saved to vault.");
+                            }
+                            _ => {
+                                println!("Tokens not saved.");
+                                println!("  Worker token:  {}...", &tokens.worker[..24.min(tokens.worker.len())]);
+                                println!("  Manager token: {}...", &tokens.manager[..24.min(tokens.manager.len())]);
+                            }
                         }
-                        _ => {
-                            println!("Tokens not saved.");
-                            println!("  Worker token:  {}...", &tokens.worker[..24.min(tokens.worker.len())]);
-                            println!("  Manager token: {}...", &tokens.manager[..24.min(tokens.manager.len())]);
-                        }
+                    } else {
+                        println!("Continuing without swarm. Some commands may not work.");
                     }
-                } else {
-                    println!("Continuing without swarm. Some commands may not work.");
                 }
             }
         }
+
+        #[cfg(feature = "tui")]
+        if matches!(cli.command, Commands::Dashboard) {
+            crate::tui::run_tui(client.as_ref()).await?;
+            return Ok(());
+        }
+
+        let client = client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Docker daemon is not available. Please install Docker or set DOCKER_HOST.")
+        })?;
 
         match cli.command {
             Commands::Get {
@@ -1074,7 +1098,7 @@ impl Cli {
             }
             #[cfg(feature = "tui")]
             Commands::Dashboard => {
-                crate::tui::run_tui(&client).await?;
+                crate::tui::run_tui(Some(client)).await?;
             }
             Commands::Context { command } => match command {
                 ContextCommand::Ls => {
@@ -1397,7 +1421,6 @@ impl Cli {
                 | Commands::Logs { .. }
                 | Commands::Ports { .. }
                 | Commands::ClusterInfo
-                | Commands::Dashboard
                 | Commands::Apply { .. }
                 | Commands::Run { .. }
                 | Commands::Events

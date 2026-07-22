@@ -226,7 +226,11 @@ impl App {
         }
     }
 
-    pub async fn refresh(&mut self, client: &DockerClient) -> anyhow::Result<()> {
+    pub async fn refresh(&mut self, client: Option<&DockerClient>) -> anyhow::Result<()> {
+        let client = match client {
+            Some(c) => c,
+            None => return Ok(()),
+        };
         self.last_refresh = Instant::now();
         match self.state {
             AppState::Services => {
@@ -536,13 +540,16 @@ impl App {
     }
 }
 
-pub async fn run_tui(client: &DockerClient) -> anyhow::Result<()> {
-    let host_info = match client.inner().info().await {
-        Ok(info) => {
-            let name = info.name.unwrap_or_else(|| "docker".to_string());
-            format!("docker@{}", name)
-        }
-        Err(_) => "docker".to_string(),
+pub async fn run_tui(client: Option<&DockerClient>) -> anyhow::Result<()> {
+    let host_info = match client {
+        Some(c) => match c.inner().info().await {
+            Ok(info) => {
+                let name = info.name.unwrap_or_else(|| "docker".to_string());
+                format!("docker@{}", name)
+            }
+            Err(_) => "docker".to_string(),
+        },
+        None => "docker (disconnected)".to_string(),
     };
 
     enable_raw_mode()?;
@@ -552,7 +559,9 @@ pub async fn run_tui(client: &DockerClient) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(host_info);
-    app.refresh(client).await?;
+    if let Some(c) = client {
+        app.refresh(Some(c)).await?;
+    }
 
     let res = run_app(&mut terminal, &mut app, client).await;
 
@@ -574,7 +583,7 @@ pub async fn run_tui(client: &DockerClient) -> anyhow::Result<()> {
 async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
-    client: &DockerClient,
+    client: Option<&DockerClient>,
 ) -> anyhow::Result<()> {
     let poll_interval = Duration::from_millis(100);
 
