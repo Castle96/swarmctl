@@ -637,6 +637,40 @@ pub enum ContextCommand {
         #[arg(short, long, value_enum)]
         output: Option<OutputFormat>,
     },
+    /// Create a new Docker context for a remote host
+    Create {
+        /// Context name
+        name: String,
+
+        /// Docker host address (e.g. tcp://192.168.1.100:2375, ssh://user@host)
+        #[arg(long)]
+        host: String,
+
+        /// Default Docker API version (optional)
+        #[arg(long)]
+        docker_api_version: Option<String>,
+
+        /// Skip TLS verification for TCP connections
+        #[arg(long)]
+        skip_tls_verify: bool,
+
+        /// Path to TLS CA certificate
+        #[arg(long)]
+        tlscacert: Option<String>,
+
+        /// Path to TLS client certificate
+        #[arg(long)]
+        tlscert: Option<String>,
+
+        /// Path to TLS client key
+        #[arg(long)]
+        tlskey: Option<String>,
+    },
+    /// Remove a Docker context
+    Rm {
+        /// Context name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -898,58 +932,66 @@ impl Cli {
         };
 
         let is_dashboard = matches!(cli.command, Commands::Dashboard);
+        let connection_target = crate::api::docker_check::get_connection_summary(&cli.host, &cli.context);
+
         let client = match try_client() {
             Ok(c) => Some(c),
             Err(e) if is_dashboard => {
                 eprintln!("Warning: Docker not available ({}). Dashboard will launch in offline mode.", e);
                 None
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                let docker_installed = crate::api::docker_check::is_docker_installed();
+                if docker_installed {
+                    eprintln!("Error: Cannot connect to Docker daemon at {}.", connection_target);
+                    eprintln!();
+                    eprintln!("  The Docker CLI is installed, but the daemon is not reachable.");
+                    eprintln!();
+                    eprintln!("  Possible causes:");
+                    eprintln!("    - Docker daemon is not running (try: sudo systemctl start docker)");
+                    eprintln!("    - Incorrect DOCKER_HOST or context configuration");
+                    eprintln!("    - SSH connection failed for remote host");
+                    eprintln!("    - TLS certificate issues");
+                    eprintln!();
+                    eprintln!("  To connect to a remote Docker daemon:");
+                    eprintln!("    --host tcp://<remote-ip>:2375          (unencrypted)");
+                    eprintln!("    --host ssh://user@<remote-host>       (SSH tunnel)");
+                    eprintln!("    --context <name>                       (use a Docker context)");
+                    eprintln!("    DOCKER_HOST=tcp://<remote-ip>:2375 swarmctl ...");
+                    eprintln!();
+                    eprintln!("  To create a context for a remote host:");
+                    eprintln!("    docker context create remote --docker host=tcp://<remote-ip>:2375");
+                    eprintln!("    swarmctl context use remote");
+                    eprintln!();
+                    eprintln!("  Full error: {}", e);
+                } else {
+                    eprintln!("Error: Docker is not installed or not found in PATH.");
+                    eprintln!();
+                    eprintln!("  Install Docker: https://docs.docker.com/get-docker/");
+                    eprintln!();
+                    eprintln!("  If Docker is installed but not in PATH, set DOCKER_HOST:");
+                    eprintln!("    export DOCKER_HOST=tcp://<docker-host>:2375");
+                }
+                return Err(e);
+            }
         };
 
         if Self::needs_swarm(&cli.command) {
             if let Some(ref client) = client {
-                if !crate::api::swarm::is_swarm_active(client.inner()).await {
+                let swarm_active = crate::api::swarm::is_swarm_active(client.inner()).await;
+                println!("Connected to Docker daemon ({})", connection_target);
+                if swarm_active {
+                    println!("Swarm is active on this node.");
+                } else {
                     println!("No swarm detected on this node.");
-                    print!("Would you like to initialize a swarm? [y/N] ");
-                    use std::io::Write;
-                    std::io::stdout().flush()?;
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    if input.trim().eq_ignore_ascii_case("y") {
-                        let addr = Self::detect_local_ip();
-                        println!("Initializing swarm with advertise address {}...", addr);
-                        let node_id = crate::api::swarm::init_swarm(client.inner(), &addr).await?;
-                        println!("Swarm initialized. Node ID: {}", node_id);
-
-                        let tokens = crate::api::swarm::get_join_tokens(client.inner()).await?;
-
-                        match rpassword::prompt_password("Vault password (to save tokens, or empty to skip): ") {
-                            Ok(vault_password) if !vault_password.is_empty() => {
-                                let vault = if crate::vault::LocalVault::exists() {
-                                    crate::vault::LocalVault::open(&vault_password)?
-                                } else {
-                                    crate::vault::LocalVault::create(&vault_password)?
-                                };
-                                let mut vault = vault;
-                                let host = std::env::var("DOCKER_HOST")
-                                    .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
-                                let swarm_name = client.inner().info().await
-                                    .ok()
-                                    .and_then(|i| i.name)
-                                    .unwrap_or_else(|| "docker".to_string());
-                                vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
-                                println!("Tokens saved to vault.");
-                            }
-                            _ => {
-                                println!("Tokens not saved.");
-                                println!("  Worker token:  {}...", &tokens.worker[..24.min(tokens.worker.len())]);
-                                println!("  Manager token: {}...", &tokens.manager[..24.min(tokens.manager.len())]);
-                            }
-                        }
-                    } else {
-                        println!("Continuing without swarm. Some commands may not work.");
-                    }
+                    println!();
+                    println!("  To initialize a swarm here:");
+                    println!("    swarmctl swarm init");
+                    println!();
+                    println!("  To join an existing remote swarm:");
+                    println!("    swarmctl swarm join <token> --remote <manager-ip:2377>");
+                    println!();
+                    println!("  Continuing without swarm. Some commands may not work.");
                 }
             }
         }
@@ -1110,6 +1152,29 @@ impl Cli {
                 ContextCommand::Inspect { name, output } => {
                     let output = output.unwrap_or(cli.output);
                     context::run_inspect(name, output).await?;
+                }
+                ContextCommand::Create {
+                    name,
+                    host,
+                    docker_api_version,
+                    skip_tls_verify,
+                    tlscacert,
+                    tlscert,
+                    tlskey,
+                } => {
+                    context::run_create(
+                        name,
+                        host,
+                        docker_api_version,
+                        skip_tls_verify,
+                        tlscacert,
+                        tlscert,
+                        tlskey,
+                    )
+                    .await?;
+                }
+                ContextCommand::Rm { name } => {
+                    context::run_rm(name).await?;
                 }
             },
             Commands::Apply {
@@ -1446,17 +1511,5 @@ impl Cli {
                 | Commands::Promote { .. }
                 | Commands::Demote { .. }
         )
-    }
-
-    fn detect_local_ip() -> String {
-        use std::net::UdpSocket;
-        let socket = UdpSocket::bind("0.0.0.0:0").ok();
-        socket
-            .and_then(|s| {
-                s.connect("8.8.8.8:80").ok()?;
-                s.local_addr().ok()
-            })
-            .map(|addr| addr.ip().to_string())
-            .unwrap_or_else(|| "127.0.0.1".to_string())
     }
 }
