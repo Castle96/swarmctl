@@ -1,8 +1,9 @@
 use crate::api::client::DockerClient;
 use crate::cli::{
     api_resources, apply, attach, cluster, completion, config, context, cordon, cp, create, delete,
-    describe, diff, discover, edit, events, exec, explain, get, label, logs, patch, port_forward,
-    ports, replace, rollout, run, scale, set, stack, swarm, taint, top, vault, wait,
+    describe, diff, discover, edit, events, exec, explain, failover, get, label, logs, patch,
+    port_forward, ports, replace, rollout, run, scale, set, stack, swarm, taint, top, vault,
+    volume, wait,
 };
 #[cfg(feature = "tui")]
 use crate::tui;
@@ -597,6 +598,18 @@ enum Commands {
         /// Node name or ID
         name: String,
     },
+
+    /// Manage Docker volumes
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommand,
+    },
+
+    /// Manage container failover and data migration
+    Failover {
+        #[command(subcommand)]
+        command: FailoverCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -728,6 +741,71 @@ pub enum VaultCommand {
     Unlock,
     /// Change the vault password
     SetKey,
+}
+
+#[derive(Subcommand)]
+pub enum VolumeCommand {
+    /// List volumes
+    Ls {
+        /// Output format
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
+    },
+    /// Inspect a volume
+    Inspect {
+        /// Volume name
+        name: String,
+        /// Output format
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
+    },
+    /// Create a volume
+    Create {
+        /// Volume name
+        name: String,
+        /// Volume driver (default: local)
+        #[arg(long)]
+        driver: Option<String>,
+        /// Labels (KEY=VAL)
+        #[arg(short, long)]
+        labels: Vec<String>,
+    },
+    /// Remove a volume
+    Rm {
+        /// Volume name
+        name: String,
+        /// Force removal
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum FailoverCommand {
+    /// Show failover status and events
+    Status {
+        /// Output format
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
+    },
+    /// Enable automatic failover
+    Enable,
+    /// Disable automatic failover
+    Disable,
+    /// Manually migrate a volume between nodes
+    Migrate {
+        /// Volume name to migrate
+        volume: String,
+        /// Source node name or ID
+        #[arg(long)]
+        from: String,
+        /// Target node name or ID
+        #[arg(long)]
+        to: String,
+        /// Output format
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1470,6 +1548,47 @@ impl Cli {
                 crate::api::node::demote_node(client.inner(), &node_id).await?;
                 println!("Node {} demoted to worker.", name);
             }
+            Commands::Volume { command } => match command {
+                VolumeCommand::Ls { output } => {
+                    let output = output.unwrap_or(cli.output);
+                    volume::run_ls(&client, output).await?;
+                }
+                VolumeCommand::Inspect { name, output } => {
+                    let output = output.unwrap_or(cli.output);
+                    volume::run_inspect(&client, name, output).await?;
+                }
+                VolumeCommand::Create {
+                    name,
+                    driver,
+                    labels,
+                } => {
+                    volume::run_create(&client, name, driver, labels).await?;
+                }
+                VolumeCommand::Rm { name, force } => {
+                    volume::run_rm(&client, name, force).await?;
+                }
+            },
+            Commands::Failover { command } => match command {
+                FailoverCommand::Status { output } => {
+                    let output = output.unwrap_or(cli.output);
+                    failover::run_status(&client, output).await?;
+                }
+                FailoverCommand::Enable => {
+                    failover::run_enable(&client).await?;
+                }
+                FailoverCommand::Disable => {
+                    failover::run_disable(&client).await?;
+                }
+                FailoverCommand::Migrate {
+                    volume,
+                    from,
+                    to,
+                    output,
+                } => {
+                    let output = output.unwrap_or(cli.output);
+                    failover::run_migrate(&client, volume, from, to, output).await?;
+                }
+            },
         }
 
         Ok(())
@@ -1510,6 +1629,8 @@ impl Cli {
                 | Commands::Replace { .. }
                 | Commands::Promote { .. }
                 | Commands::Demote { .. }
+                | Commands::Volume { .. }
+                | Commands::Failover { .. }
         )
     }
 }
