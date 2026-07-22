@@ -29,26 +29,6 @@ pub struct DiscoveredHost {
     pub join_token_manager: Option<String>,
 }
 
-impl DiscoveredHost {
-    pub fn summary(&self) -> String {
-        if self.swarm_active {
-            let managers = self.manager_count.unwrap_or(0);
-            let total = self.node_count.unwrap_or(0);
-            format!(
-                "{} | swarm: {} ({} managers, {} nodes) | {}",
-                self.ip,
-                self.swarm_name.as_deref().unwrap_or("unnamed"),
-                managers,
-                total,
-                if self.is_manager { "manager" } else { "worker" }
-            )
-        } else {
-            let docker_ver = self.docker_version.as_deref().unwrap_or("unknown");
-            format!("{} | docker {} (no swarm)", self.ip, docker_ver)
-        }
-    }
-}
-
 pub fn detect_local_subnet() -> Result<Vec<Ipv4Addr>> {
     let local_ip = detect_local_ip()?;
     let octets = local_ip.octets();

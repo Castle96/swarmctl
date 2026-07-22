@@ -2,7 +2,7 @@ pub mod crypto;
 pub mod models;
 
 use anyhow::{Context, Result};
-use models::{JoinTokens, NodeRecord, VaultData, VaultFile, VAULT_DIR, VAULT_FILE, VAULT_VERSION};
+use models::{JoinTokens, VaultData, VaultFile, VAULT_DIR, VAULT_FILE, VAULT_VERSION};
 use std::fs;
 use std::path::PathBuf;
 use zeroize::Zeroize;
@@ -109,10 +109,6 @@ impl LocalVault {
         self.data.as_ref()
     }
 
-    pub fn data_mut(&mut self) -> Option<&mut VaultData> {
-        self.data.as_mut()
-    }
-
     pub fn store_swarm_tokens(&mut self, tokens: JoinTokens, unlock_key: Option<String>, docker_host: &str, swarm_name: &str) -> Result<()> {
         if let Some(ref mut data) = self.data {
             data.join_tokens = tokens;
@@ -121,37 +117,6 @@ impl LocalVault {
             data.swarm_name = swarm_name.to_string();
         }
         self.save()
-    }
-
-    pub fn add_node(&mut self, record: NodeRecord) -> Result<()> {
-        if let Some(ref mut data) = self.data {
-            data.nodes.retain(|n| n.node_id != record.node_id);
-            data.nodes.push(record);
-        }
-        self.save()
-    }
-
-    pub fn remove_node(&mut self, node_id: &str) -> Result<()> {
-        if let Some(ref mut data) = self.data {
-            data.nodes.retain(|n| n.node_id != node_id);
-        }
-        self.save()
-    }
-
-    pub fn get_worker_token(&self) -> Option<&str> {
-        self.data.as_ref().map(|d| d.join_tokens.worker.as_str()).filter(|s| !s.is_empty())
-    }
-
-    pub fn get_manager_token(&self) -> Option<&str> {
-        self.data.as_ref().map(|d| d.join_tokens.manager.as_str()).filter(|s| !s.is_empty())
-    }
-
-    pub fn get_unlock_key(&self) -> Option<&str> {
-        self.data.as_ref().and_then(|d| d.unlock_key.as_deref()).filter(|s| !s.is_empty())
-    }
-
-    pub fn nodes(&self) -> Vec<&NodeRecord> {
-        self.data.as_ref().map(|d| d.nodes.iter().collect()).unwrap_or_default()
     }
 
     pub fn rotate_tokens(&mut self, tokens: JoinTokens) -> Result<()> {
@@ -169,7 +134,6 @@ impl LocalVault {
     pub fn status(&self) -> VaultStatus {
         match &self.data {
             Some(d) => VaultStatus {
-                exists: true,
                 created_at: d.created_at.clone(),
                 swarm_name: d.swarm_name.clone(),
                 has_tokens: !d.join_tokens.worker.is_empty() || !d.join_tokens.manager.is_empty(),
@@ -189,7 +153,6 @@ impl Drop for LocalVault {
 
 #[derive(Default)]
 pub struct VaultStatus {
-    pub exists: bool,
     pub created_at: String,
     pub swarm_name: String,
     pub has_tokens: bool,

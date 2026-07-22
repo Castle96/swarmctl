@@ -33,6 +33,7 @@ pub struct ContextMetadata {
 pub struct Endpoint {
     pub host: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub skip_tls_verify: Option<bool>,
     #[serde(default)]
     pub tls: Option<TlsConfig>,

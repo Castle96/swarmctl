@@ -177,7 +177,7 @@ async fn logs_task(
     task_id: String,
     follow: bool,
     tail: i64,
-    timestamps: bool,
+    _timestamps: bool,
     since: Option<String>,
     prefix: bool,
     ignore_errors: bool,

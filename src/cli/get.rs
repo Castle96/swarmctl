@@ -13,7 +13,7 @@ pub async fn run(
     selector: Option<String>,
     field_selector: Option<String>,
     sort_by: Option<String>,
-    all_namespaces: bool,
+    _all_namespaces: bool,
     watch: bool,
 ) -> anyhow::Result<()> {
     loop {

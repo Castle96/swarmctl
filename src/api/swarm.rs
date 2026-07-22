@@ -81,38 +81,6 @@ pub async fn rotate_join_tokens(docker: &Docker) -> anyhow::Result<JoinTokens> {
     Ok(new_tokens)
 }
 
-pub async fn set_autolock(docker: &Docker, enabled: bool) -> anyhow::Result<()> {
-    let swarm = docker.inspect_swarm().await?;
-    let version = swarm
-        .version
-        .context("No swarm version")?
-        .index
-        .unwrap_or(0);
-    let mut spec = swarm.spec.context("No swarm spec")?;
-
-    let tokens = spec
-        .encryption_config
-        .get_or_insert_with(Default::default);
-    tokens.auto_lock_managers = Some(enabled);
-
-    let options = UpdateSwarmOptions {
-        version: version as i64,
-        ..Default::default()
-    };
-    docker.update_swarm(spec, options).await?;
-    Ok(())
-}
-
-pub fn get_node_addr(docker: &Docker) -> anyhow::Result<String> {
-    let info = futures::executor::block_on(docker.info())?;
-    let addr = info
-        .swarm
-        .as_ref()
-        .and_then(|s| s.node_addr.clone())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    Ok(addr)
-}
-
 fn generate_token() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();

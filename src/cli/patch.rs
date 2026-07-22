@@ -5,7 +5,7 @@ pub async fn run(
     resource: &str,
     name: String,
     patch_content: String,
-    dry_run: bool,
+    _dry_run: bool,
 ) -> anyhow::Result<()> {
     let patch: serde_json::Value = serde_json::from_str(&patch_content)?;
 

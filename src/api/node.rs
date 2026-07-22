@@ -8,10 +8,6 @@ pub async fn list_nodes(docker: &Docker) -> anyhow::Result<Vec<Node>> {
         .await?)
 }
 
-pub async fn inspect_node(docker: &Docker, node_id: &str) -> anyhow::Result<Node> {
-    Ok(docker.inspect_node(node_id).await?)
-}
-
 pub async fn promote_node(docker: &Docker, node_id: &str) -> anyhow::Result<()> {
     let node = docker.inspect_node(node_id).await?;
     let version = node
@@ -44,26 +40,6 @@ pub async fn demote_node(docker: &Docker, node_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn set_availability(
-    docker: &Docker,
-    node_id: &str,
-    availability: bollard::models::NodeSpecAvailabilityEnum,
-) -> anyhow::Result<()> {
-    let node = docker.inspect_node(node_id).await?;
-    let version = node
-        .version
-        .and_then(|v| v.index)
-        .unwrap_or(0);
-    let mut spec = node.spec.unwrap_or_default();
-    spec.availability = Some(availability);
-
-    let options = UpdateNodeOptions {
-        version: version as i64,
-    };
-    docker.update_node(node_id, spec, options).await?;
-    Ok(())
-}
-
 pub async fn get_node_id_by_hostname(
     docker: &Docker,
     hostname: &str,
@@ -77,19 +53,6 @@ pub async fn get_node_id_by_hostname(
         }
     }
     Ok(None)
-}
-
-pub async fn get_swarm_nodes(docker: &Docker) -> anyhow::Result<Vec<Node>> {
-    let mut filter = std::collections::HashMap::new();
-    filter.insert(
-        "role".to_string(),
-        vec!["manager".to_string(), "worker".to_string()],
-    );
-    let options = bollard::query_parameters::ListNodesOptions {
-        filters: Some(filter),
-        ..Default::default()
-    };
-    Ok(docker.list_nodes(Some(options)).await?)
 }
 
 pub async fn get_managers(docker: &Docker) -> anyhow::Result<Vec<Node>> {

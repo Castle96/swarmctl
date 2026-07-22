@@ -18,7 +18,6 @@ use std::io;
 const COLOR_PRIMARY: Color = Color::Cyan;
 const COLOR_SUCCESS: Color = Color::Green;
 const COLOR_WARNING: Color = Color::Yellow;
-const COLOR_ERROR: Color = Color::Red;
 const COLOR_DIM: Color = Color::DarkGray;
 const COLOR_HEADER_BG: Color = Color::Rgb(40, 44, 52);
 const COLOR_SELECTION_BG: Color = Color::Rgb(50, 54, 62);
@@ -183,7 +182,6 @@ struct TuiState {
     hosts: Vec<DiscoveredHost>,
     selected_index: usize,
     create_new_selected: bool,
-    detail_open: bool,
 }
 
 impl TuiState {
@@ -192,12 +190,7 @@ impl TuiState {
             hosts,
             selected_index: 0,
             create_new_selected: false,
-            detail_open: false,
         }
-    }
-
-    fn total_items(&self) -> usize {
-        self.hosts.len() + 1
     }
 
     fn move_up(&mut self) {

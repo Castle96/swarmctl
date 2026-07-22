@@ -1,9 +1,9 @@
 use crate::api::client::DockerClient;
-use crate::api::discovery::{self, DiscoveredHost};
+use crate::api::discovery::{self};
 use anyhow::Result;
 
 pub async fn run_scan(
-    client: &DockerClient,
+    _client: &DockerClient,
     subnet: Option<String>,
     json_output: bool,
 ) -> Result<()> {

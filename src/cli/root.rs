@@ -1244,8 +1244,8 @@ impl Cli {
             }
             Commands::Explain {
                 resource,
-                recursive,
-                api_version,
+                recursive: _,
+                api_version: _,
             } => {
                 let resource_str = resource.map(|r| r.to_string());
                 explain::run(resource_str).await?;
@@ -1255,7 +1255,7 @@ impl Cli {
                 name,
                 condition,
                 timeout,
-                jsonpath,
+                jsonpath: _,
             } => {
                 let resource_str = resource.to_string();
                 wait::run(&client, &resource_str, name, condition, timeout).await?;
