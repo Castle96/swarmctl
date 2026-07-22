@@ -46,6 +46,10 @@ pub async fn run(
             let ports = list_used_ports(client.inner()).await?;
             print_yaml(&ports)?;
         }
+        OutputFormat::Wide | OutputFormat::Name => {
+            let ports = list_service_ports(client.inner()).await?;
+            print_ports_table(&ports);
+        }
     }
     Ok(())
 }

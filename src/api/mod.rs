@@ -1,5 +1,7 @@
 pub mod client;
 pub mod config;
+pub mod context;
+pub mod discovery;
 pub mod network;
 pub mod node;
 pub mod port;

@@ -40,6 +40,32 @@ impl DockerClient {
         Ok(Self { docker })
     }
 
+    pub fn with_context(context_name: Option<&str>) -> anyhow::Result<Self> {
+        let config = Self::resolve_config(context_name)?;
+        Self::with_config(&config)
+    }
+
+    fn resolve_config(context_name: Option<&str>) -> anyhow::Result<ConnectionConfig> {
+        if let Some(name) = context_name {
+            let ctx = crate::api::context::get_context(name)?;
+            return Ok(ctx.to_connection_config());
+        }
+
+        if let Some(host) = env::var("DOCKER_HOST").ok() {
+            return Ok(ConnectionConfig {
+                host: Some(host),
+                ..Default::default()
+            });
+        }
+
+        if let Ok(Some(ctx)) = crate::api::context::get_active_context() {
+            log::info!("Using Docker context: {}", ctx.name);
+            return Ok(ctx.to_connection_config());
+        }
+
+        Ok(ConnectionConfig::default())
+    }
+
     fn connect(config: &ConnectionConfig) -> Result<Docker, bollard::errors::Error> {
         if let Some(host) = &config.host {
             let host = host.trim();

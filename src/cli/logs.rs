@@ -9,13 +9,43 @@ pub async fn run(
     follow: bool,
     tail: i64,
     previous: bool,
+    timestamps: bool,
+    since: Option<String>,
+    prefix: bool,
+    ignore_errors: bool,
 ) -> anyhow::Result<()> {
     match resource {
-        LogResourceType::Service => logs_service(client, name, follow, tail, previous).await?,
-        LogResourceType::Task => logs_task(client, name, follow, tail).await?,
+        LogResourceType::Service => {
+            logs_service(client, name, follow, tail, previous, timestamps, since, prefix, ignore_errors).await?
+        }
+        LogResourceType::Task => {
+            logs_task(client, name, follow, tail, timestamps, since, prefix, ignore_errors).await?
+        }
     }
 
     Ok(())
+}
+
+fn parse_since(since: &str) -> anyhow::Result<i64> {
+    let trimmed = since.trim();
+    if let Some(s) = trimmed.strip_suffix('s') {
+        let num: i64 = s.parse()?;
+        return Ok(num);
+    }
+    if let Some(m) = trimmed.strip_suffix('m') {
+        let num: i64 = m.parse()?;
+        return Ok(num * 60);
+    }
+    if let Some(h) = trimmed.strip_suffix('h') {
+        let num: i64 = h.parse()?;
+        return Ok(num * 3600);
+    }
+    if let Some(d) = trimmed.strip_suffix('d') {
+        let num: i64 = d.parse()?;
+        return Ok(num * 86400);
+    }
+    let num: i64 = trimmed.parse()?;
+    Ok(num)
 }
 
 async fn logs_service(
@@ -24,6 +54,10 @@ async fn logs_service(
     follow: bool,
     tail: i64,
     previous: bool,
+    timestamps: bool,
+    since: Option<String>,
+    prefix: bool,
+    ignore_errors: bool,
 ) -> anyhow::Result<()> {
     let services = crate::api::service::list_services(client.inner()).await?;
     let _service = services
@@ -54,7 +88,7 @@ async fn logs_service(
             let task_name = task.name.as_deref().unwrap_or(task_id);
             println!("--- Previous task: {} (ID: {}) ---", task_name, task_id);
 
-            let log_opts = bollard::query_parameters::LogsOptions {
+            let mut log_opts = bollard::query_parameters::LogsOptions {
                 follow: false,
                 stdout: true,
                 stderr: true,
@@ -66,18 +100,36 @@ async fn logs_service(
                 ..Default::default()
             };
 
+            if timestamps {
+                log_opts.since = since.as_deref().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            }
+
             let mut logs = client.inner().task_logs(task_id, Some(log_opts));
             while let Some(log_result) = logs.next().await {
                 match log_result {
-                    Ok(log) => print!("{}", log),
-                    Err(e) => eprintln!("Error reading task logs: {}", e),
+                    Ok(log) => {
+                        let line = log.to_string();
+                        let prefix_str = if prefix {
+                            format!("[{}] ", task_name)
+                        } else {
+                            String::new()
+                        };
+                        print!("{}{}", prefix_str, line);
+                    }
+                    Err(e) => {
+                        if ignore_errors {
+                            eprintln!("Error reading task logs: {}", e);
+                        } else {
+                            return Err(e.into());
+                        }
+                    }
                 }
             }
         }
         return Ok(());
     }
 
-    let options = bollard::query_parameters::LogsOptions {
+    let mut log_opts = bollard::query_parameters::LogsOptions {
         follow,
         stdout: true,
         stderr: true,
@@ -89,14 +141,30 @@ async fn logs_service(
         ..Default::default()
     };
 
-    let mut logs = client.inner().service_logs(&name, Some(options));
+    if let Some(since_str) = &since {
+        let seconds = parse_since(since_str)?;
+        log_opts.since = seconds as i32;
+    }
+
+    let mut logs = client.inner().service_logs(&name, Some(log_opts));
 
     while let Some(log_result) = logs.next().await {
         match log_result {
-            Ok(log) => print!("{}", log),
+            Ok(log) => {
+                let line = log.to_string();
+                let prefix_str = if prefix {
+                    format!("[{}] ", name)
+                } else {
+                    String::new()
+                };
+                print!("{}{}", prefix_str, line);
+            }
             Err(e) => {
-                eprintln!("Error reading logs: {}", e);
-                break;
+                if ignore_errors {
+                    eprintln!("Error reading logs: {}", e);
+                } else {
+                    return Err(e.into());
+                }
             }
         }
     }
@@ -109,8 +177,12 @@ async fn logs_task(
     task_id: String,
     follow: bool,
     tail: i64,
+    timestamps: bool,
+    since: Option<String>,
+    prefix: bool,
+    ignore_errors: bool,
 ) -> anyhow::Result<()> {
-    let options = bollard::query_parameters::LogsOptions {
+    let mut log_opts = bollard::query_parameters::LogsOptions {
         follow,
         stdout: true,
         stderr: true,
@@ -122,14 +194,30 @@ async fn logs_task(
         ..Default::default()
     };
 
-    let mut logs = client.inner().task_logs(&task_id, Some(options));
+    if let Some(since_str) = &since {
+        let seconds = parse_since(since_str)?;
+        log_opts.since = seconds as i32;
+    }
+
+    let mut logs = client.inner().task_logs(&task_id, Some(log_opts));
 
     while let Some(log_result) = logs.next().await {
         match log_result {
-            Ok(log) => print!("{}", log),
+            Ok(log) => {
+                let line = log.to_string();
+                let prefix_str = if prefix {
+                    format!("[{}] ", task_id)
+                } else {
+                    String::new()
+                };
+                print!("{}{}", prefix_str, line);
+            }
             Err(e) => {
-                eprintln!("Error reading task logs: {}", e);
-                break;
+                if ignore_errors {
+                    eprintln!("Error reading task logs: {}", e);
+                } else {
+                    return Err(e.into());
+                }
             }
         }
     }

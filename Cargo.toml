@@ -3,6 +3,10 @@ name = "swarmctl"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:crossterm"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bollard = { version = "0.20", features = ["ssl", "ssh"] }
@@ -17,6 +21,12 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 futures = "0.3"
 base64 = "0.22"
-ratatui = "0.28"
-crossterm = "0.28"
+ratatui = { version = "0.28", optional = true }
+crossterm = { version = "0.28", optional = true }
 tempfile = "3"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rpassword = "7"
+directories = "5"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.8"

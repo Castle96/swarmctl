@@ -2,39 +2,7 @@ use crate::api::client::DockerClient;
 use crate::cli::root::{OutputFormat, ResourceType};
 use crate::models::{network::NetworkRow, node::NodeRow, service::ServiceRow};
 use crate::utils::printer::{print_json, print_table, print_yaml};
-use std::collections::HashMap;
-
-fn matches_selector(labels: &Option<HashMap<String, String>>, selector: &str) -> bool {
-    let Some((key, value)) = selector.split_once('=') else {
-        return false;
-    };
-    labels
-        .as_ref()
-        .and_then(|l| l.get(key))
-        .map(|v| v == value)
-        .unwrap_or(false)
-}
-
-fn format_labels(labels: &Option<HashMap<String, String>>) -> String {
-    match labels {
-        Some(map) if !map.is_empty() => {
-            let pairs: Vec<String> = map.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-            pairs.join(",")
-        }
-        _ => String::new(),
-    }
-}
-
-fn show_labels_if_needed(rows: &[impl AsRef<str>], labels: &[String], show_labels: bool) {
-    if !show_labels {
-        return;
-    }
-    for (_row, lbl) in rows.iter().zip(labels.iter()) {
-        if !lbl.is_empty() {
-            println!("  Labels: {}", lbl);
-        }
-    }
-}
+use crate::utils::selectors::{format_labels, matches_selector};
 
 pub async fn run(
     client: &DockerClient,
@@ -43,61 +11,151 @@ pub async fn run(
     output: OutputFormat,
     show_labels: bool,
     selector: Option<String>,
+    field_selector: Option<String>,
+    sort_by: Option<String>,
+    all_namespaces: bool,
     watch: bool,
 ) -> anyhow::Result<()> {
-    match resource {
-        ResourceType::Nodes => {
-            if let Some(name) = name {
-                get_node(client, &name, output).await?;
-            } else {
-                get_nodes(client, output, show_labels, selector, watch).await?;
+    loop {
+        match resource {
+            ResourceType::Nodes => {
+                if let Some(name) = &name {
+                    get_node(client, name, output.clone()).await?;
+                } else {
+                    get_nodes(
+                        client,
+                        output.clone(),
+                        show_labels,
+                        selector.clone(),
+                        field_selector.clone(),
+                        sort_by.clone(),
+                        watch,
+                    )
+                    .await?;
+                }
+            }
+            ResourceType::Services => {
+                if let Some(name) = &name {
+                    get_service(client, name, output.clone()).await?;
+                } else {
+                    get_services(
+                        client,
+                        output.clone(),
+                        show_labels,
+                        selector.clone(),
+                        field_selector.clone(),
+                        sort_by.clone(),
+                        watch,
+                    )
+                    .await?;
+                }
+            }
+            ResourceType::Tasks => {
+                if let Some(name) = &name {
+                    get_task(client, name, output.clone()).await?;
+                } else {
+                    get_tasks(
+                        client,
+                        output.clone(),
+                        show_labels,
+                        selector.clone(),
+                        field_selector.clone(),
+                        sort_by.clone(),
+                        watch,
+                    )
+                    .await?;
+                }
+            }
+            ResourceType::Networks => {
+                if let Some(name) = &name {
+                    get_network(client, name, output.clone()).await?;
+                } else {
+                    get_networks(
+                        client,
+                        output.clone(),
+                        show_labels,
+                        selector.clone(),
+                        field_selector.clone(),
+                        sort_by.clone(),
+                        watch,
+                    )
+                    .await?;
+                }
+            }
+            ResourceType::Secrets => {
+                if let Some(name) = &name {
+                    get_secret(client, name, output.clone()).await?;
+                } else {
+                    get_secrets(
+                        client,
+                        output.clone(),
+                        show_labels,
+                        selector.clone(),
+                        field_selector.clone(),
+                        sort_by.clone(),
+                        watch,
+                    )
+                    .await?;
+                }
+            }
+            ResourceType::Configs => {
+                if let Some(name) = &name {
+                    get_config(client, name, output.clone()).await?;
+                } else {
+                    get_configs(
+                        client,
+                        output.clone(),
+                        show_labels,
+                        selector.clone(),
+                        field_selector.clone(),
+                        sort_by.clone(),
+                        watch,
+                    )
+                    .await?;
+                }
+            }
+            ResourceType::Stacks => {
+                if let Some(name) = &name {
+                    get_stack(client, name, output.clone()).await?;
+                } else {
+                    get_stacks(client, output.clone(), show_labels, watch).await?;
+                }
             }
         }
-        ResourceType::Services => {
-            if let Some(name) = name {
-                get_service(client, &name, output).await?;
-            } else {
-                get_services(client, output, show_labels, selector, watch).await?;
-            }
+
+        if !watch {
+            break;
         }
-        ResourceType::Tasks => {
-            if let Some(name) = name {
-                get_task(client, &name, output).await?;
-            } else {
-                get_tasks(client, output, show_labels, selector, watch).await?;
-            }
-        }
-        ResourceType::Networks => {
-            if let Some(name) = name {
-                get_network(client, &name, output).await?;
-            } else {
-                get_networks(client, output, show_labels, selector, watch).await?;
-            }
-        }
-        ResourceType::Secrets => {
-            if let Some(name) = name {
-                get_secret(client, &name, output).await?;
-            } else {
-                get_secrets(client, output, show_labels, selector, watch).await?;
-            }
-        }
-        ResourceType::Configs => {
-            if let Some(name) = name {
-                get_config(client, &name, output).await?;
-            } else {
-                get_configs(client, output, show_labels, selector, watch).await?;
-            }
-        }
-        ResourceType::Stacks => {
-            if let Some(name) = name {
-                get_stack(client, &name, output).await?;
-            } else {
-                get_stacks(client, output, show_labels, selector, watch).await?;
-            }
-        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
     Ok(())
+}
+
+fn matches_field_selector(
+    value: &serde_json::Value,
+    field_selector: &str,
+) -> bool {
+    let Some((key, expected)) = field_selector.split_once('=') else {
+        return true;
+    };
+    let actual = value.pointer(&format!("/{}", key.replace('.', "/")));
+    match actual {
+        Some(serde_json::Value::String(s)) => s == expected,
+        Some(serde_json::Value::Number(n)) => n.to_string() == expected,
+        Some(serde_json::Value::Bool(b)) => b.to_string() == expected,
+        _ => false,
+    }
+}
+
+fn sort_by_path(rows: &mut Vec<serde_json::Value>, path: &str) {
+    let json_path = format!("/{}", path.replace('.', "/"));
+    rows.sort_by(|a, b| {
+        let a_val = a.pointer(&json_path).unwrap_or(&serde_json::Value::Null);
+        let b_val = b.pointer(&json_path).unwrap_or(&serde_json::Value::Null);
+        a_val.to_string().cmp(&b_val.to_string())
+    });
 }
 
 async fn get_nodes(
@@ -105,6 +163,8 @@ async fn get_nodes(
     output: OutputFormat,
     show_labels: bool,
     selector: Option<String>,
+    field_selector: Option<String>,
+    sort_by: Option<String>,
     _watch: bool,
 ) -> anyhow::Result<()> {
     let nodes = crate::api::node::list_nodes(client.inner()).await?;
@@ -115,6 +175,15 @@ async fn get_nodes(
             selector
                 .as_ref()
                 .map(|sel| matches_selector(&n.spec.as_ref().and_then(|s| s.labels.clone()), sel))
+                .unwrap_or(true)
+        })
+        .filter(|n| {
+            field_selector
+                .as_ref()
+                .map(|sel| {
+                    let json = serde_json::to_value(n).unwrap_or_default();
+                    matches_field_selector(&json, sel)
+                })
                 .unwrap_or(true)
         })
         .map(|n| {
@@ -156,12 +225,40 @@ async fn get_nodes(
     match output {
         OutputFormat::Table => {
             print_table(&rows);
-            let label_strs: Vec<String> = rows.iter().map(|r| r.labels.clone()).collect();
-            let row_refs: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-            show_labels_if_needed(&row_refs, &label_strs, show_labels);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
         }
         OutputFormat::Json => print_json(&rows)?,
         OutputFormat::Yaml => print_yaml(&rows)?,
+        OutputFormat::Wide => {
+            print_table(&rows);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
+        }
+        OutputFormat::Name => {
+            for row in &rows {
+                println!("node/{}", row.hostname);
+            }
+        }
+    }
+
+    if let Some(sort_field) = sort_by {
+        let mut json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap_or_default())
+            .collect();
+        sort_by_path(&mut json_rows, &sort_field);
+        print_json(&json_rows)?;
     }
 
     Ok(())
@@ -172,6 +269,8 @@ async fn get_services(
     output: OutputFormat,
     show_labels: bool,
     selector: Option<String>,
+    field_selector: Option<String>,
+    sort_by: Option<String>,
     _watch: bool,
 ) -> anyhow::Result<()> {
     let services = crate::api::service::list_services(client.inner()).await?;
@@ -183,6 +282,15 @@ async fn get_services(
                 .as_ref()
                 .map(|sel| {
                     matches_selector(&s.spec.as_ref().and_then(|spec| spec.labels.clone()), sel)
+                })
+                .unwrap_or(true)
+        })
+        .filter(|s| {
+            field_selector
+                .as_ref()
+                .map(|sel| {
+                    let json = serde_json::to_value(s).unwrap_or_default();
+                    matches_field_selector(&json, sel)
                 })
                 .unwrap_or(true)
         })
@@ -219,12 +327,40 @@ async fn get_services(
     match output {
         OutputFormat::Table => {
             print_table(&rows);
-            let label_strs: Vec<String> = rows.iter().map(|r| r.labels.clone()).collect();
-            let row_refs: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-            show_labels_if_needed(&row_refs, &label_strs, show_labels);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
         }
         OutputFormat::Json => print_json(&rows)?,
         OutputFormat::Yaml => print_yaml(&rows)?,
+        OutputFormat::Wide => {
+            print_table(&rows);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
+        }
+        OutputFormat::Name => {
+            for row in &rows {
+                println!("service/{}", row.name);
+            }
+        }
+    }
+
+    if let Some(sort_field) = sort_by {
+        let mut json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap_or_default())
+            .collect();
+        sort_by_path(&mut json_rows, &sort_field);
+        print_json(&json_rows)?;
     }
 
     Ok(())
@@ -238,7 +374,7 @@ async fn get_node(client: &DockerClient, name: &str, output: OutputFormat) -> an
         .ok_or_else(|| anyhow::anyhow!("Node {} not found", name))?;
 
     match output {
-        OutputFormat::Table => {
+        OutputFormat::Table | OutputFormat::Wide => {
             let spec = node.spec.unwrap_or_default();
             let status = node.status.unwrap_or_default();
             println!("Name: {}", spec.name.unwrap_or_default());
@@ -268,6 +404,10 @@ async fn get_node(client: &DockerClient, name: &str, output: OutputFormat) -> an
         }
         OutputFormat::Json => print_json(&node)?,
         OutputFormat::Yaml => print_yaml(&node)?,
+        OutputFormat::Name => {
+            let spec = node.spec.unwrap_or_default();
+            println!("node/{}", spec.name.unwrap_or_default());
+        }
     }
 
     Ok(())
@@ -285,7 +425,7 @@ async fn get_service(
         .ok_or_else(|| anyhow::anyhow!("Service {} not found", name))?;
 
     match output {
-        OutputFormat::Table => {
+        OutputFormat::Table | OutputFormat::Wide => {
             let spec = service.spec.unwrap_or_default();
             println!("Name: {}", spec.name.unwrap_or_default());
             println!("ID: {}", service.id.unwrap_or_default());
@@ -310,6 +450,10 @@ async fn get_service(
         }
         OutputFormat::Json => print_json(&service)?,
         OutputFormat::Yaml => print_yaml(&service)?,
+        OutputFormat::Name => {
+            let spec = service.spec.unwrap_or_default();
+            println!("service/{}", spec.name.unwrap_or_default());
+        }
     }
 
     Ok(())
@@ -320,6 +464,8 @@ async fn get_tasks(
     output: OutputFormat,
     show_labels: bool,
     selector: Option<String>,
+    field_selector: Option<String>,
+    sort_by: Option<String>,
     _watch: bool,
 ) -> anyhow::Result<()> {
     let tasks = crate::api::task::list_tasks(client.inner()).await?;
@@ -337,6 +483,15 @@ async fn get_tasks(
                             .and_then(|c| c.labels.clone()),
                         sel,
                     )
+                })
+                .unwrap_or(true)
+        })
+        .filter(|t| {
+            field_selector
+                .as_ref()
+                .map(|sel| {
+                    let json = serde_json::to_value(t).unwrap_or_default();
+                    matches_field_selector(&json, sel)
                 })
                 .unwrap_or(true)
         })
@@ -376,12 +531,40 @@ async fn get_tasks(
     match output {
         OutputFormat::Table => {
             print_table(&rows);
-            let label_strs: Vec<String> = rows.iter().map(|r| r.labels.clone()).collect();
-            let row_refs: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-            show_labels_if_needed(&row_refs, &label_strs, show_labels);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
         }
         OutputFormat::Json => print_json(&rows)?,
         OutputFormat::Yaml => print_yaml(&rows)?,
+        OutputFormat::Wide => {
+            print_table(&rows);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
+        }
+        OutputFormat::Name => {
+            for row in &rows {
+                println!("task/{}", row.id);
+            }
+        }
+    }
+
+    if let Some(sort_field) = sort_by {
+        let mut json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap_or_default())
+            .collect();
+        sort_by_path(&mut json_rows, &sort_field);
+        print_json(&json_rows)?;
     }
 
     Ok(())
@@ -397,7 +580,7 @@ async fn get_task(client: &DockerClient, name: &str, output: OutputFormat) -> an
         .ok_or_else(|| anyhow::anyhow!("Task {} not found", name))?;
 
     match output {
-        OutputFormat::Table => {
+        OutputFormat::Table | OutputFormat::Wide => {
             println!("ID: {}", task.id.unwrap_or_default());
             println!("Name: {}", task.name.unwrap_or_default());
             let labels = task
@@ -432,6 +615,9 @@ async fn get_task(client: &DockerClient, name: &str, output: OutputFormat) -> an
         }
         OutputFormat::Json => print_json(&task)?,
         OutputFormat::Yaml => print_yaml(&task)?,
+        OutputFormat::Name => {
+            println!("task/{}", task.id.unwrap_or_default());
+        }
     }
 
     Ok(())
@@ -442,6 +628,8 @@ async fn get_networks(
     output: OutputFormat,
     show_labels: bool,
     selector: Option<String>,
+    field_selector: Option<String>,
+    sort_by: Option<String>,
     _watch: bool,
 ) -> anyhow::Result<()> {
     let networks = crate::api::network::list_networks(client.inner()).await?;
@@ -452,6 +640,15 @@ async fn get_networks(
             selector
                 .as_ref()
                 .map(|sel| matches_selector(&n.labels.clone(), sel))
+                .unwrap_or(true)
+        })
+        .filter(|n| {
+            field_selector
+                .as_ref()
+                .map(|sel| {
+                    let json = serde_json::to_value(n).unwrap_or_default();
+                    matches_field_selector(&json, sel)
+                })
                 .unwrap_or(true)
         })
         .map(|n| {
@@ -471,12 +668,40 @@ async fn get_networks(
     match output {
         OutputFormat::Table => {
             print_table(&rows);
-            let label_strs: Vec<String> = rows.iter().map(|r| r.labels.clone()).collect();
-            let row_refs: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-            show_labels_if_needed(&row_refs, &label_strs, show_labels);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
         }
         OutputFormat::Json => print_json(&rows)?,
         OutputFormat::Yaml => print_yaml(&rows)?,
+        OutputFormat::Wide => {
+            print_table(&rows);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
+        }
+        OutputFormat::Name => {
+            for row in &rows {
+                println!("network/{}", row.name);
+            }
+        }
+    }
+
+    if let Some(sort_field) = sort_by {
+        let mut json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap_or_default())
+            .collect();
+        sort_by_path(&mut json_rows, &sort_field);
+        print_json(&json_rows)?;
     }
 
     Ok(())
@@ -496,7 +721,7 @@ async fn get_network(
         .ok_or_else(|| anyhow::anyhow!("Network {} not found", name))?;
 
     match output {
-        OutputFormat::Table => {
+        OutputFormat::Table | OutputFormat::Wide => {
             println!("Name: {}", network.name.unwrap_or("unknown".to_string()));
             println!("ID: {}", network.id.unwrap_or_default());
             println!(
@@ -516,6 +741,9 @@ async fn get_network(
         }
         OutputFormat::Json => print_json(&network)?,
         OutputFormat::Yaml => print_yaml(&network)?,
+        OutputFormat::Name => {
+            println!("network/{}", network.name.unwrap_or("unknown".to_string()));
+        }
     }
 
     Ok(())
@@ -526,6 +754,8 @@ async fn get_secrets(
     output: OutputFormat,
     show_labels: bool,
     selector: Option<String>,
+    field_selector: Option<String>,
+    sort_by: Option<String>,
     _watch: bool,
 ) -> anyhow::Result<()> {
     let secrets = crate::api::secret::list_secrets(client.inner()).await?;
@@ -537,6 +767,15 @@ async fn get_secrets(
                 .as_ref()
                 .map(|sel| {
                     matches_selector(&s.spec.as_ref().and_then(|spec| spec.labels.clone()), sel)
+                })
+                .unwrap_or(true)
+        })
+        .filter(|s| {
+            field_selector
+                .as_ref()
+                .map(|sel| {
+                    let json = serde_json::to_value(s).unwrap_or_default();
+                    matches_field_selector(&json, sel)
                 })
                 .unwrap_or(true)
         })
@@ -554,12 +793,40 @@ async fn get_secrets(
     match output {
         OutputFormat::Table => {
             print_table(&rows);
-            let label_strs: Vec<String> = rows.iter().map(|r| r.labels.clone()).collect();
-            let row_refs: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-            show_labels_if_needed(&row_refs, &label_strs, show_labels);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
         }
         OutputFormat::Json => print_json(&rows)?,
         OutputFormat::Yaml => print_yaml(&rows)?,
+        OutputFormat::Wide => {
+            print_table(&rows);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
+        }
+        OutputFormat::Name => {
+            for row in &rows {
+                println!("secret/{}", row.name);
+            }
+        }
+    }
+
+    if let Some(sort_field) = sort_by {
+        let mut json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap_or_default())
+            .collect();
+        sort_by_path(&mut json_rows, &sort_field);
+        print_json(&json_rows)?;
     }
 
     Ok(())
@@ -573,7 +840,7 @@ async fn get_secret(client: &DockerClient, name: &str, output: OutputFormat) -> 
         .ok_or_else(|| anyhow::anyhow!("Secret {} not found", name))?;
 
     match output {
-        OutputFormat::Table => {
+        OutputFormat::Table | OutputFormat::Wide => {
             println!(
                 "Name: {}",
                 secret
@@ -592,6 +859,15 @@ async fn get_secret(client: &DockerClient, name: &str, output: OutputFormat) -> 
         }
         OutputFormat::Json => print_json(&secret)?,
         OutputFormat::Yaml => print_yaml(&secret)?,
+        OutputFormat::Name => {
+            let default_name = "unknown".to_string();
+            let name = secret
+                .spec
+                .as_ref()
+                .and_then(|s| s.name.as_ref())
+                .unwrap_or(&default_name);
+            println!("secret/{}", name);
+        }
     }
 
     Ok(())
@@ -602,6 +878,8 @@ async fn get_configs(
     output: OutputFormat,
     show_labels: bool,
     selector: Option<String>,
+    field_selector: Option<String>,
+    sort_by: Option<String>,
     _watch: bool,
 ) -> anyhow::Result<()> {
     let configs = crate::api::config::list_configs(client.inner()).await?;
@@ -613,6 +891,15 @@ async fn get_configs(
                 .as_ref()
                 .map(|sel| {
                     matches_selector(&c.spec.as_ref().and_then(|spec| spec.labels.clone()), sel)
+                })
+                .unwrap_or(true)
+        })
+        .filter(|c| {
+            field_selector
+                .as_ref()
+                .map(|sel| {
+                    let json = serde_json::to_value(c).unwrap_or_default();
+                    matches_field_selector(&json, sel)
                 })
                 .unwrap_or(true)
         })
@@ -630,12 +917,40 @@ async fn get_configs(
     match output {
         OutputFormat::Table => {
             print_table(&rows);
-            let label_strs: Vec<String> = rows.iter().map(|r| r.labels.clone()).collect();
-            let row_refs: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-            show_labels_if_needed(&row_refs, &label_strs, show_labels);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
         }
         OutputFormat::Json => print_json(&rows)?,
         OutputFormat::Yaml => print_yaml(&rows)?,
+        OutputFormat::Wide => {
+            print_table(&rows);
+            if show_labels {
+                for row in &rows {
+                    if !row.labels.is_empty() {
+                        println!("  Labels: {}", row.labels);
+                    }
+                }
+            }
+        }
+        OutputFormat::Name => {
+            for row in &rows {
+                println!("config/{}", row.name);
+            }
+        }
+    }
+
+    if let Some(sort_field) = sort_by {
+        let mut json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap_or_default())
+            .collect();
+        sort_by_path(&mut json_rows, &sort_field);
+        print_json(&json_rows)?;
     }
 
     Ok(())
@@ -649,7 +964,7 @@ async fn get_config(client: &DockerClient, name: &str, output: OutputFormat) -> 
         .ok_or_else(|| anyhow::anyhow!("Config {} not found", name))?;
 
     match output {
-        OutputFormat::Table => {
+        OutputFormat::Table | OutputFormat::Wide => {
             println!(
                 "Name: {}",
                 config
@@ -668,6 +983,43 @@ async fn get_config(client: &DockerClient, name: &str, output: OutputFormat) -> 
         }
         OutputFormat::Json => print_json(&config)?,
         OutputFormat::Yaml => print_yaml(&config)?,
+        OutputFormat::Name => {
+            let default_name = "unknown".to_string();
+            let name = config
+                .spec
+                .as_ref()
+                .and_then(|s| s.name.as_ref())
+                .unwrap_or(&default_name);
+            println!("config/{}", name);
+        }
+    }
+
+    Ok(())
+}
+
+async fn get_stack(
+    client: &DockerClient,
+    name: &str,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let stacks = crate::api::stack::list_stacks(client.inner()).await?;
+    let stack = stacks
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow::anyhow!("Stack '{}' not found", name))?;
+
+    let row = crate::models::stack::StackRow {
+        name: stack.name,
+        services: stack.services.to_string(),
+        replicas: stack.replicas.to_string(),
+    };
+
+    match output {
+        OutputFormat::Table => print_table(&[row]),
+        OutputFormat::Json => print_json(&row)?,
+        OutputFormat::Yaml => print_yaml(&row)?,
+        OutputFormat::Wide => print_table(&[row]),
+        OutputFormat::Name => println!("stack/{}", row.name),
     }
 
     Ok(())
@@ -677,7 +1029,6 @@ async fn get_stacks(
     client: &DockerClient,
     output: OutputFormat,
     _show_labels: bool,
-    _selector: Option<String>,
     _watch: bool,
 ) -> anyhow::Result<()> {
     let stacks = crate::api::stack::list_stacks(client.inner()).await?;
@@ -697,51 +1048,14 @@ async fn get_stacks(
         }
         OutputFormat::Json => print_json(&rows)?,
         OutputFormat::Yaml => print_yaml(&rows)?,
-    }
-
-    Ok(())
-}
-
-async fn get_stack(client: &DockerClient, name: &str, output: OutputFormat) -> anyhow::Result<()> {
-    let services = crate::api::stack::get_stack_services(client.inner(), name).await?;
-
-    if services.is_empty() {
-        return Err(anyhow::anyhow!("Stack {} not found", name));
-    }
-
-    match output {
-        OutputFormat::Table => {
-            println!("Stack: {}", name);
-            println!("Services: {}", services.len());
-            println!();
-            println!("{:<40} {:<15} {:<15}", "SERVICE", "IMAGE", "REPLICAS");
-            println!("{}", "-".repeat(70));
-
-            for service in &services {
-                let spec = service.spec.as_ref();
-                let name = spec.and_then(|s| s.name.clone()).unwrap_or_default();
-                let image = spec
-                    .and_then(|s| s.task_template.as_ref())
-                    .and_then(|t| t.container_spec.as_ref())
-                    .and_then(|c| c.image.clone())
-                    .unwrap_or_default();
-                let replicas = spec
-                    .and_then(|s| s.mode.as_ref())
-                    .and_then(|m| m.replicated.as_ref())
-                    .and_then(|r| r.replicas)
-                    .map(|r| r.to_string())
-                    .unwrap_or_else(|| "global".to_string());
-
-                println!(
-                    "{:<40} {:<15} {:<15}",
-                    name,
-                    image.split(':').next().unwrap_or(&image),
-                    replicas
-                );
+        OutputFormat::Wide => {
+            print_table(&rows);
+        }
+        OutputFormat::Name => {
+            for row in &rows {
+                println!("stack/{}", row.name);
             }
         }
-        OutputFormat::Json => print_json(&services)?,
-        OutputFormat::Yaml => print_yaml(&services)?,
     }
 
     Ok(())

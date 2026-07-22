@@ -33,6 +33,12 @@ pub async fn run_ls(client: &DockerClient, output: OutputFormat) -> anyhow::Resu
         OutputFormat::Table => print_table(&rows),
         OutputFormat::Json => print_json(&rows)?,
         OutputFormat::Yaml => print_yaml(&rows)?,
+        OutputFormat::Wide => print_table(&rows),
+        OutputFormat::Name => {
+            for row in &rows {
+                println!("config/{}", row.name);
+            }
+        }
     }
 
     Ok(())
@@ -110,6 +116,15 @@ pub async fn run_inspect(
         }
         OutputFormat::Json => print_json(&config)?,
         OutputFormat::Yaml => print_yaml(&config)?,
+        OutputFormat::Wide => {
+            let spec = config.spec.as_ref().unwrap();
+            println!("Name:\t{}", spec.name.as_deref().unwrap_or("unknown"));
+            println!("ID:\t{}", config.id.unwrap_or_default());
+        }
+        OutputFormat::Name => {
+            let spec = config.spec.as_ref().unwrap();
+            println!("config/{}", spec.name.as_deref().unwrap_or("unknown"));
+        }
     }
 
     Ok(())

@@ -7,12 +7,13 @@ pub async fn run(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     match resource {
-        ResourceType::Services => apply_service(client, name, filename, stdin).await?,
-        ResourceType::Configs => apply_config(client, name, filename, stdin).await?,
-        ResourceType::Secrets => apply_secret(client, name, filename, stdin).await?,
-        ResourceType::Networks => apply_network(client, name, filename, stdin).await?,
+        ResourceType::Services => apply_service(client, name, filename, stdin, dry_run).await?,
+        ResourceType::Configs => apply_config(client, name, filename, stdin, dry_run).await?,
+        ResourceType::Secrets => apply_secret(client, name, filename, stdin, dry_run).await?,
+        ResourceType::Networks => apply_network(client, name, filename, stdin, dry_run).await?,
         _ => {
             return Err(anyhow::anyhow!(
                 "apply is not yet supported for {:?}",
@@ -60,6 +61,7 @@ async fn apply_service(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let spec_value = read_spec(filename, stdin)?;
     let spec_json = spec_to_json(&spec_value)?;
@@ -73,6 +75,11 @@ async fn apply_service(
 
     let spec: bollard::models::ServiceSpec = serde_json::from_value(spec_json)
         .map_err(|e| anyhow::anyhow!("Invalid service spec: {}", e))?;
+
+    if dry_run {
+        println!("[dry run] Would apply service '{}'", service_name);
+        return Ok(());
+    }
 
     let services = crate::api::service::list_services(client.inner()).await?;
     let existing = services
@@ -106,6 +113,7 @@ async fn apply_config(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let spec_value = read_spec(filename, stdin)?;
     let spec_json = spec_to_json(&spec_value)?;
@@ -119,6 +127,11 @@ async fn apply_config(
 
     let spec: bollard::models::ConfigSpec = serde_json::from_value(spec_json)
         .map_err(|e| anyhow::anyhow!("Invalid config spec: {}", e))?;
+
+    if dry_run {
+        println!("[dry run] Would apply config '{}'", config_name);
+        return Ok(());
+    }
 
     let configs = crate::api::config::list_configs(client.inner()).await?;
     let existing = configs
@@ -143,6 +156,7 @@ async fn apply_secret(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let spec_value = read_spec(filename, stdin)?;
     let spec_json = spec_to_json(&spec_value)?;
@@ -156,6 +170,11 @@ async fn apply_secret(
 
     let spec: bollard::models::SecretSpec = serde_json::from_value(spec_json)
         .map_err(|e| anyhow::anyhow!("Invalid secret spec: {}", e))?;
+
+    if dry_run {
+        println!("[dry run] Would apply secret '{}'", secret_name);
+        return Ok(());
+    }
 
     let secrets = crate::api::secret::list_secrets(client.inner()).await?;
     let existing = secrets
@@ -180,6 +199,7 @@ async fn apply_network(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let spec_value = read_spec(filename, stdin)?;
     let spec_json = spec_to_json(&spec_value)?;
@@ -193,6 +213,11 @@ async fn apply_network(
 
     let spec: bollard::models::NetworkCreateRequest = serde_json::from_value(spec_json)
         .map_err(|e| anyhow::anyhow!("Invalid network spec: {}", e))?;
+
+    if dry_run {
+        println!("[dry run] Would apply network '{}'", network_name);
+        return Ok(());
+    }
 
     let networks = crate::api::network::list_networks(client.inner()).await?;
     let existing = networks

@@ -1,20 +1,72 @@
 use crate::api::client::DockerClient;
 use crate::cli::root::{OutputFormat, ResourceType};
+use crate::utils::selectors::matches_selector;
 
 pub async fn run(
     client: &DockerClient,
     resource: ResourceType,
-    name: String,
+    name: Option<String>,
+    selector: Option<String>,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
-    match resource {
-        ResourceType::Nodes => describe_node(client, &name, output).await?,
-        ResourceType::Services => describe_service(client, &name, output).await?,
-        ResourceType::Tasks => describe_task(client, &name, output).await?,
-        ResourceType::Networks => describe_network(client, &name, output).await?,
-        ResourceType::Secrets => describe_secret(client, &name, output).await?,
-        ResourceType::Configs => describe_config(client, &name, output).await?,
-        ResourceType::Stacks => describe_stack(client, &name, output).await?,
+    if let Some(name) = name {
+        match resource {
+            ResourceType::Nodes => describe_node(client, &name, output).await?,
+            ResourceType::Services => describe_service(client, &name, output).await?,
+            ResourceType::Tasks => describe_task(client, &name, output).await?,
+            ResourceType::Networks => describe_network(client, &name, output).await?,
+            ResourceType::Secrets => describe_secret(client, &name, output).await?,
+            ResourceType::Configs => describe_config(client, &name, output).await?,
+            ResourceType::Stacks => describe_stack(client, &name, output).await?,
+        }
+    } else if let Some(sel) = selector {
+        match resource {
+            ResourceType::Services => {
+                let services = crate::api::service::list_services(client.inner()).await?;
+                let matching: Vec<_> = services
+                    .into_iter()
+                    .filter(|s| {
+                        matches_selector(&s.spec.as_ref().and_then(|sp| sp.labels.clone()), &sel)
+                    })
+                    .collect();
+                for service in matching {
+                    let svc_name = service
+                        .spec
+                        .as_ref()
+                        .and_then(|sp| sp.name.as_ref())
+                        .unwrap_or(&"unknown".to_string())
+                        .clone();
+                    describe_service(client, &svc_name, output.clone()).await?;
+                }
+            }
+            ResourceType::Nodes => {
+                let nodes = crate::api::node::list_nodes(client.inner()).await?;
+                let matching: Vec<_> = nodes
+                    .into_iter()
+                    .filter(|n| {
+                        matches_selector(&n.spec.as_ref().and_then(|sp| sp.labels.clone()), &sel)
+                    })
+                    .collect();
+                for node in matching {
+                    let node_name = node
+                        .spec
+                        .as_ref()
+                        .and_then(|sp| sp.name.as_ref())
+                        .unwrap_or(&"unknown".to_string())
+                        .clone();
+                    describe_node(client, &node_name, output.clone()).await?;
+                }
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "describe with --selector is only supported for services and nodes"
+                ));
+            }
+        }
+    } else {
+        return Err(anyhow::anyhow!(
+            "Must specify resource name or --selector"
+        ));
     }
 
     Ok(())
@@ -93,6 +145,11 @@ async fn describe_node(
         }
         OutputFormat::Json => crate::utils::printer::print_json(&node)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&node)?,
+        OutputFormat::Wide | OutputFormat::Name => {
+            let spec = node.spec.as_ref().unwrap();
+            println!("Name:\t{}", spec.name.as_ref().unwrap_or(&"".to_string()));
+            println!("ID:\t{}", node.id.as_ref().unwrap_or(&"".to_string()));
+        }
     }
 
     Ok(())
@@ -183,6 +240,11 @@ async fn describe_service(
         }
         OutputFormat::Json => crate::utils::printer::print_json(&service)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&service)?,
+        OutputFormat::Wide | OutputFormat::Name => {
+            let spec = service.spec.as_ref().unwrap();
+            println!("Name:\t{}", spec.name.as_ref().unwrap_or(&"".to_string()));
+            println!("ID:\t{}", service.id.as_ref().unwrap_or(&"".to_string()));
+        }
     }
 
     Ok(())
@@ -243,6 +305,10 @@ async fn describe_task(
         }
         OutputFormat::Json => crate::utils::printer::print_json(&task)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&task)?,
+        OutputFormat::Wide | OutputFormat::Name => {
+            println!("ID:\t{}", task.id.unwrap_or_default());
+            println!("Name:\t{}", task.name.unwrap_or_default());
+        }
     }
 
     Ok(())
@@ -277,6 +343,10 @@ async fn describe_network(
         }
         OutputFormat::Json => crate::utils::printer::print_json(&network)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&network)?,
+        OutputFormat::Wide | OutputFormat::Name => {
+            println!("Name:\t{}", network.name.unwrap_or_default());
+            println!("ID:\t{}", network.id.unwrap_or_default());
+        }
     }
 
     Ok(())
@@ -317,6 +387,10 @@ async fn describe_secret(
         }
         OutputFormat::Json => crate::utils::printer::print_json(&secret)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&secret)?,
+        OutputFormat::Wide | OutputFormat::Name => {
+            println!("Name:\t{}", secret.spec.as_ref().and_then(|s| s.name.as_ref()).unwrap_or(&"unknown".to_string()));
+            println!("ID:\t{}", secret.id.unwrap_or_default());
+        }
     }
 
     Ok(())
@@ -357,6 +431,10 @@ async fn describe_config(
         }
         OutputFormat::Json => crate::utils::printer::print_json(&config)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&config)?,
+        OutputFormat::Wide | OutputFormat::Name => {
+            println!("Name:\t{}", config.spec.as_ref().and_then(|s| s.name.as_ref()).unwrap_or(&"unknown".to_string()));
+            println!("ID:\t{}", config.id.unwrap_or_default());
+        }
     }
 
     Ok(())
@@ -406,6 +484,10 @@ async fn describe_stack(
         }
         OutputFormat::Json => crate::utils::printer::print_json(&services)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&services)?,
+        OutputFormat::Wide | OutputFormat::Name => {
+            println!("Stack:\t{}", name);
+            println!("Services:\t{}", services.len());
+        }
     }
 
     Ok(())

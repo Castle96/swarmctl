@@ -149,6 +149,28 @@ pub async fn run_undo(client: &DockerClient, service_name: String) -> anyhow::Re
     Ok(())
 }
 
+pub async fn run_pause(client: &DockerClient, service_name: String) -> anyhow::Result<()> {
+    let services = crate::api::service::list_services(client.inner()).await?;
+    let _existing = services
+        .into_iter()
+        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&service_name))
+        .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name))?;
+
+    eprintln!("Warning: Service rollout pause is not supported by the Docker API in this bollard version");
+    Ok(())
+}
+
+pub async fn run_resume(client: &DockerClient, service_name: String) -> anyhow::Result<()> {
+    let services = crate::api::service::list_services(client.inner()).await?;
+    let _existing = services
+        .into_iter()
+        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&service_name))
+        .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name))?;
+
+    eprintln!("Warning: Service rollout resume is not supported by the Docker API in this bollard version");
+    Ok(())
+}
+
 pub async fn run_restart(client: &DockerClient, service_name: String) -> anyhow::Result<()> {
     let services = crate::api::service::list_services(client.inner()).await?;
     let existing = services

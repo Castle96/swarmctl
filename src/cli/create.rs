@@ -8,12 +8,13 @@ pub async fn run(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     match resource {
-        ResourceType::Services => create_service(client, name, filename, stdin).await?,
-        ResourceType::Networks => create_network(client, name, filename, stdin).await?,
-        ResourceType::Secrets => create_secret(client, name, filename, stdin).await?,
-        ResourceType::Configs => create_config(client, name, filename, stdin).await?,
+        ResourceType::Services => create_service(client, name, filename, stdin, dry_run).await?,
+        ResourceType::Networks => create_network(client, name, filename, stdin, dry_run).await?,
+        ResourceType::Secrets => create_secret(client, name, filename, stdin, dry_run).await?,
+        ResourceType::Configs => create_config(client, name, filename, stdin, dry_run).await?,
         _ => {
             return Err(anyhow::anyhow!(
                 "Creating {} is not yet supported",
@@ -30,6 +31,7 @@ async fn create_service(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let spec_content = if stdin {
         let mut buffer = String::new();
@@ -41,13 +43,19 @@ async fn create_service(
         return Err(anyhow::anyhow!("Must specify --filename or use --stdin"));
     };
 
-    // Parse the service spec (assuming JSON for now)
     let spec: bollard::models::ServiceSpec = serde_json::from_str(&spec_content)?;
 
-    // Override name if provided
     let mut final_spec = spec;
     if let Some(name) = name {
         final_spec.name = Some(name);
+    }
+
+    if dry_run {
+        println!(
+            "[dry run] Would create service '{}'",
+            final_spec.name.as_deref().unwrap_or("unknown")
+        );
+        return Ok(());
     }
 
     let response = client.inner().create_service(final_spec, None).await?;
@@ -64,6 +72,7 @@ async fn create_network(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let spec_content = if stdin {
         let mut buffer = String::new();
@@ -75,13 +84,19 @@ async fn create_network(
         return Err(anyhow::anyhow!("Must specify --filename or use --stdin"));
     };
 
-    // Parse the network spec
     let spec: bollard::models::NetworkCreateRequest = serde_json::from_str(&spec_content)?;
 
-    // Override name if provided
     let mut final_spec = spec;
     if let Some(name) = name {
         final_spec.name = name;
+    }
+
+    if dry_run {
+        println!(
+            "[dry run] Would create network '{}'",
+            final_spec.name
+        );
+        return Ok(());
     }
 
     let response = client.inner().create_network(final_spec).await?;
@@ -95,6 +110,7 @@ async fn create_secret(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let data = if stdin {
         let mut buffer = Vec::new();
@@ -107,6 +123,11 @@ async fn create_secret(
     };
 
     let secret_name = name.ok_or_else(|| anyhow::anyhow!("Secret name is required"))?;
+
+    if dry_run {
+        println!("[dry run] Would create secret '{}'", secret_name);
+        return Ok(());
+    }
 
     let data_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
 
@@ -127,6 +148,7 @@ async fn create_config(
     name: Option<String>,
     filename: Option<String>,
     stdin: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let data = if stdin {
         let mut buffer = Vec::new();
@@ -139,6 +161,11 @@ async fn create_config(
     };
 
     let config_name = name.ok_or_else(|| anyhow::anyhow!("Config name is required"))?;
+
+    if dry_run {
+        println!("[dry run] Would create config '{}'", config_name);
+        return Ok(());
+    }
 
     let data_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
 
