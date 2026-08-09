@@ -2,8 +2,8 @@ use crate::api::client::DockerClient;
 use crate::cli::{
     api_resources, apply, attach, cluster, completion, config, context, cordon, cp, create, delete,
     describe, diff, discover, edit, events, exec, explain, failover, get, label, logs, patch,
-    port_forward, ports, replace, rollout, run, scale, set, stack, swarm, taint, top, vault,
-    volume, wait,
+    port_forward, ports, replace, rollout, run, scale, set, stack, swarm, system, taint, top,
+    vault, volume, wait,
 };
 #[cfg(feature = "tui")]
 use crate::tui;
@@ -319,7 +319,15 @@ enum Commands {
     },
 
     /// Stream Docker swarm events
-    Events,
+    Events {
+        /// Filter by event type (container, image, service, node, network, etc.)
+        #[arg(long = "filter-type", value_name = "TYPE")]
+        filter_types: Vec<String>,
+
+        /// Show events created since this timestamp (e.g. "1h", "30m", or unix timestamp)
+        #[arg(long)]
+        since: Option<String>,
+    },
 
     /// Execute a command in a running container
     Exec {
@@ -605,6 +613,12 @@ enum Commands {
         command: VolumeCommand,
     },
 
+    /// System-level commands (info, df, ping)
+    System {
+        #[command(subcommand)]
+        command: SystemCommand,
+    },
+
     /// Manage container failover and data migration
     Failover {
         #[command(subcommand)]
@@ -778,6 +792,20 @@ pub enum VolumeCommand {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SystemCommand {
+    /// Show Docker system information
+    Info {
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show Docker disk usage
+    Df,
+    /// Ping the Docker daemon
+    Ping,
 }
 
 #[derive(Subcommand)]
@@ -1279,8 +1307,11 @@ impl Cli {
                 )
                 .await?;
             }
-            Commands::Events => {
-                events::run(&client).await?;
+            Commands::Events {
+                filter_types,
+                since,
+            } => {
+                events::run(&client, filter_types, since).await?;
             }
             Commands::Exec { service, command } => {
                 exec::run(&client, service, command).await?;
@@ -1568,6 +1599,11 @@ impl Cli {
                     volume::run_rm(&client, name, force).await?;
                 }
             },
+            Commands::System { command } => match command {
+                SystemCommand::Info { json } => system::info(&client, json).await?,
+                SystemCommand::Df => system::df(&client).await?,
+                SystemCommand::Ping => system::ping(&client).await?,
+            },
             Commands::Failover { command } => match command {
                 FailoverCommand::Status { output } => {
                     let output = output.unwrap_or(cli.output);
@@ -1607,7 +1643,7 @@ impl Cli {
                 | Commands::ClusterInfo
                 | Commands::Apply { .. }
                 | Commands::Run { .. }
-                | Commands::Events
+                | Commands::Events { .. }
                 | Commands::Exec { .. }
                 | Commands::Attach { .. }
                 | Commands::Top { .. }
@@ -1630,6 +1666,7 @@ impl Cli {
                 | Commands::Promote { .. }
                 | Commands::Demote { .. }
                 | Commands::Volume { .. }
+                | Commands::System { .. }
                 | Commands::Failover { .. }
         )
     }

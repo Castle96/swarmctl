@@ -31,6 +31,7 @@ pub mod scale;
 pub mod set;
 pub mod stack;
 pub mod swarm;
+pub mod system;
 pub mod taint;
 pub mod top;
 pub mod vault;

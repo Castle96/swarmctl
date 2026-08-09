@@ -127,6 +127,7 @@ pub async fn run(
             break;
         }
 
+        print!("\x1B[2J\x1B[1;1H");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
@@ -187,8 +188,8 @@ async fn get_nodes(
                 .unwrap_or(true)
         })
         .map(|n| {
-            let spec = n.spec.unwrap_or_default();
-            let status = n.status.unwrap_or_default();
+            let spec = n.spec.as_ref().cloned().unwrap_or_default();
+            let status = n.status.as_ref().cloned().unwrap_or_default();
 
             let manager = n
                 .manager_status
@@ -205,9 +206,19 @@ async fn get_nodes(
                 })
                 .unwrap_or("-");
 
+            let hostname = n
+                .description
+                .as_ref()
+                .and_then(|d| d.hostname.clone())
+                .or_else(|| {
+                    let s = n.spec.clone().unwrap_or_default();
+                    s.name.clone()
+                })
+                .unwrap_or_default();
+
             NodeRow {
                 id: n.id.unwrap_or_default(),
-                hostname: spec.name.unwrap_or_default(),
+                hostname,
                 status: status
                     .state
                     .unwrap_or(bollard::models::NodeState::READY)
@@ -375,9 +386,15 @@ async fn get_node(client: &DockerClient, name: &str, output: OutputFormat) -> an
 
     match output {
         OutputFormat::Table | OutputFormat::Wide => {
-            let spec = node.spec.unwrap_or_default();
+            let spec = node.spec.as_ref().cloned().unwrap_or_default();
             let status = node.status.unwrap_or_default();
-            println!("Name: {}", spec.name.unwrap_or_default());
+            let hostname = node
+                .description
+                .as_ref()
+                .and_then(|d| d.hostname.clone())
+                .or_else(|| spec.name.clone())
+                .unwrap_or_default();
+            println!("Name: {}", hostname);
             println!("ID: {}", node.id.unwrap_or_default());
             println!(
                 "Status: {}",
@@ -405,8 +422,13 @@ async fn get_node(client: &DockerClient, name: &str, output: OutputFormat) -> an
         OutputFormat::Json => print_json(&node)?,
         OutputFormat::Yaml => print_yaml(&node)?,
         OutputFormat::Name => {
-            let spec = node.spec.unwrap_or_default();
-            println!("node/{}", spec.name.unwrap_or_default());
+            let hostname = node
+                .description
+                .as_ref()
+                .and_then(|d| d.hostname.clone())
+                .or_else(|| node.spec.as_ref().and_then(|s| s.name.clone()))
+                .unwrap_or_default();
+            println!("node/{}", hostname);
         }
     }
 
