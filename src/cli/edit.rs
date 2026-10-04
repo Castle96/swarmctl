@@ -1,4 +1,5 @@
 use crate::api::client::DockerClient;
+use anyhow::Context;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -31,9 +32,20 @@ pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow:
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| "vi".to_string());
 
-    let status = std::process::Command::new(&editor).arg(&path).status()?;
+    // EDITOR is often set to something like `code -w` or `emacsclient -nw`.
+    // Passing that whole string to Command::new looks for a binary literally
+    // named "code -w" and fails with "No such file or directory".
+    let mut parts = editor.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("$EDITOR is empty"))?;
+    let status = std::process::Command::new(program)
+        .args(parts)
+        .arg(&path)
+        .status()
+        .with_context(|| format!("Failed to run editor '{}'", program))?;
     if !status.success() {
-        anyhow::bail!("Editor exited with error");
+        anyhow::bail!("Editor '{}' exited with {}", program, status);
     }
 
     let edited = std::fs::read_to_string(&path)?;
@@ -67,15 +79,35 @@ pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow:
         }
         "secret" | "secrets" => {
             let parsed: bollard::models::Secret = serde_yaml::from_str(&edited)?;
-            client.inner().delete_secret(&name).await?;
-            let spec = parsed.spec.unwrap_or_default();
-            client.inner().create_secret(spec).await?;
+            // Update in place. Deleting first and re-creating meant a failed
+            // create lost the secret entirely.
+            let existing = crate::api::secret::find_secret(client.inner(), &name).await?;
+            let id = existing
+                .id
+                .ok_or_else(|| anyhow::anyhow!("Secret '{}' has no id", name))?;
+            let version = existing.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
+            let opts = bollard::query_parameters::UpdateSecretOptionsBuilder::default()
+                .version(version)
+                .build();
+            client
+                .inner()
+                .update_secret(&id, parsed.spec.unwrap_or_default(), opts)
+                .await?;
         }
         "config" | "configs" => {
             let parsed: bollard::models::Config = serde_yaml::from_str(&edited)?;
-            client.inner().delete_config(&name).await?;
-            let spec = parsed.spec.unwrap_or_default();
-            client.inner().create_config(spec).await?;
+            let existing = crate::api::config::find_config(client.inner(), &name).await?;
+            let id = existing
+                .id
+                .ok_or_else(|| anyhow::anyhow!("Config '{}' has no id", name))?;
+            let version = existing.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
+            let opts = bollard::query_parameters::UpdateConfigOptionsBuilder::default()
+                .version(version)
+                .build();
+            client
+                .inner()
+                .update_config(&id, parsed.spec.unwrap_or_default(), opts)
+                .await?;
         }
         _ => unreachable!(),
     }

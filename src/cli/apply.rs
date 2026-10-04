@@ -147,14 +147,31 @@ async fn apply_config(
         return Ok(());
     }
 
-    let existing = crate::api::config::find_config_opt(client.inner(), &config_name).await?;
-
-    if existing.is_some() {
-        anyhow::bail!(
-            "Config '{}' already exists; delete first to recreate",
-            config_name
-        );
-    } else {
+    // apply means "make it match the file". Configs and secrets support an
+    // in-place update, so an existing object is updated rather than refused —
+    // this used to error out with "delete first to recreate", which is not what
+    // apply is for.
+    if let Some(existing) =
+        crate::api::config::find_config_opt(client.inner(), &config_name).await?
+    {
+        let id = existing
+            .id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Config '{}' has no id", config_name))?;
+        let version = existing.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
+        let opts = bollard::query_parameters::UpdateConfigOptionsBuilder::default()
+            .version(version)
+            .build();
+        client.inner().update_config(&id, spec, opts).await?;
+        let updated = client
+            .inner()
+            .inspect_config(&config_name)
+            .await
+            .unwrap_or(existing);
+        report_updated("Config", &config_name, &updated, &output)?;
+        return Ok(());
+    }
+    {
         let result = client.inner().create_config(spec).await?;
         report_created("Config", &config_name, &result, &output)?;
     }
@@ -188,14 +205,27 @@ async fn apply_secret(
         return Ok(());
     }
 
-    let existing = crate::api::secret::find_secret_opt(client.inner(), &secret_name).await?;
-
-    if existing.is_some() {
-        anyhow::bail!(
-            "Secret '{}' already exists; delete first to recreate",
-            secret_name
-        );
-    } else {
+    if let Some(existing) =
+        crate::api::secret::find_secret_opt(client.inner(), &secret_name).await?
+    {
+        let id = existing
+            .id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Secret '{}' has no id", secret_name))?;
+        let version = existing.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
+        let opts = bollard::query_parameters::UpdateSecretOptionsBuilder::default()
+            .version(version)
+            .build();
+        client.inner().update_secret(&id, spec, opts).await?;
+        let updated = client
+            .inner()
+            .inspect_secret(&secret_name)
+            .await
+            .unwrap_or(existing);
+        report_updated("Secret", &secret_name, &updated, &output)?;
+        return Ok(());
+    }
+    {
         let result = client.inner().create_secret(spec).await?;
         report_created("Secret", &secret_name, &result, &output)?;
     }
@@ -234,8 +264,24 @@ async fn apply_network(
         .into_iter()
         .find(|n| n.name.as_deref() == Some(&network_name));
 
-    if existing.is_some() {
-        println!("Network '{}' already exists, skipping", network_name);
+    // The Docker API has no way to update a network's spec in place, so an
+    // existing one is left alone. Say so explicitly rather than reporting
+    // success as though the file had been applied.
+    if let Some(existing) = existing {
+        let name = existing
+            .name
+            .clone()
+            .unwrap_or_else(|| network_name.clone());
+        println!(
+            "Network '{}' already exists and networks cannot be updated in place; left \
+             unchanged. Delete it first (and recreate its containers) if you need to \
+             change it.",
+            name
+        );
+        eprintln!(
+            "warning: network '{}' was not modified; `apply` cannot update a network",
+            name
+        );
     } else {
         let result = client.inner().create_network(spec).await?;
         report_created("Network", &network_name, &result, &output)?;

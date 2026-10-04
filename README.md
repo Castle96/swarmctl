@@ -236,6 +236,21 @@ Run `swarmctl <command> --help` for the full list. swarmctl has no flag
 that parses and then does nothing: options it cannot honour are rejected with
 an explanation rather than accepted and ignored.
 
+### Declarative management
+
+`apply` makes a resource match a file: it creates the resource if absent and
+updates it in place if present. This holds for services, configs and secrets.
+
+Networks are the exception. The Docker API cannot update a network's spec in
+place, so `apply networks` creates a missing network and leaves an existing one
+untouched, saying so on both stdout and stderr rather than reporting success.
+`replace networks --force` does delete and re-create, which orphans the
+containers attached to it.
+
+`replace` and `edit` update configs and secrets in place. They previously deleted
+the old object and created a new one, so a failed create lost the resource
+outright.
+
 ### Deleting
 
 `swarmctl delete` removes the resource. Two behaviours are worth knowing:

@@ -1,5 +1,6 @@
 use crate::api::client::DockerClient;
-use crate::cli::root::ResourceType;
+use crate::cli::root::{OutputFormat, ResourceType};
+use crate::utils::printer::{report_created, report_updated};
 use std::io::{self, Read};
 
 pub async fn run(
@@ -9,11 +10,16 @@ pub async fn run(
     stdin: bool,
     dry_run: bool,
     force: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     match resource {
         ResourceType::Services => replace_service(client, filename, stdin, dry_run, force).await?,
-        ResourceType::Configs => replace_config(client, filename, stdin, dry_run, force).await?,
-        ResourceType::Secrets => replace_secret(client, filename, stdin, dry_run, force).await?,
+        ResourceType::Configs => {
+            replace_config(client, filename, stdin, dry_run, force, output).await?
+        }
+        ResourceType::Secrets => {
+            replace_secret(client, filename, stdin, dry_run, force, output).await?
+        }
         ResourceType::Networks => replace_network(client, filename, stdin, dry_run, force).await?,
         ResourceType::Nodes => replace_node(client, filename, stdin, dry_run, force).await?,
         _ => {
@@ -109,6 +115,7 @@ async fn replace_config(
     stdin: bool,
     dry_run: bool,
     force: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let content = read_spec_file(filename, stdin)?;
     let value: serde_json::Value = serde_json::from_str(&content)
@@ -129,26 +136,40 @@ async fn replace_config(
         return Ok(());
     }
 
-    let configs = crate::api::config::list_configs(client.inner()).await?;
-    let existing = configs
-        .into_iter()
-        .find(|c| c.spec.as_ref().and_then(|sp| sp.name.as_deref()) == Some(config_name.as_str()));
-
-    if let Some(existing) = existing {
-        if force {
-            let id = existing.id.as_deref().unwrap_or(&config_name);
-            client.inner().delete_config(id).await?;
-            client.inner().create_config(spec).await?;
-            println!("Config '{}' replaced", config_name);
-        } else {
-            println!(
-                "Config '{}' already exists (use --force to replace)",
-                config_name
-            );
+    match crate::api::config::find_config_opt(client.inner(), &config_name).await? {
+        Some(existing) => {
+            if !force {
+                // Previously this printed a hint and exited 0, so a script
+                // believed it had replaced the config when nothing changed.
+                anyhow::bail!(
+                    "Config '{}' already exists. Re-run with --force to replace it, or use \
+                     `swarmctl edit config {}`.",
+                    config_name,
+                    config_name
+                );
+            }
+            // Update in place. Deleting first and re-creating meant a failed
+            // create left the config gone.
+            let id = existing
+                .id
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Config '{}' has no id", config_name))?;
+            let version = existing.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
+            let opts = bollard::query_parameters::UpdateConfigOptionsBuilder::default()
+                .version(version)
+                .build();
+            client.inner().update_config(&id, spec, opts).await?;
+            let updated = client
+                .inner()
+                .inspect_config(&config_name)
+                .await
+                .unwrap_or(existing);
+            report_updated("Config", &config_name, &updated, &output)?;
         }
-    } else {
-        client.inner().create_config(spec).await?;
-        println!("Config '{}' created", config_name);
+        None => {
+            let result = client.inner().create_config(spec).await?;
+            report_created("Config", &config_name, &result, &output)?;
+        }
     }
 
     Ok(())
@@ -160,6 +181,7 @@ async fn replace_secret(
     stdin: bool,
     dry_run: bool,
     force: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let content = read_spec_file(filename, stdin)?;
     let value: serde_json::Value = serde_json::from_str(&content)
@@ -180,26 +202,36 @@ async fn replace_secret(
         return Ok(());
     }
 
-    let secrets = crate::api::secret::list_secrets(client.inner()).await?;
-    let existing = secrets
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_deref()) == Some(secret_name.as_str()));
-
-    if let Some(existing) = existing {
-        if force {
-            let id = existing.id.as_deref().unwrap_or(&secret_name);
-            client.inner().delete_secret(id).await?;
-            client.inner().create_secret(spec).await?;
-            println!("Secret '{}' replaced", secret_name);
-        } else {
-            println!(
-                "Secret '{}' already exists (use --force to replace)",
-                secret_name
-            );
+    match crate::api::secret::find_secret_opt(client.inner(), &secret_name).await? {
+        Some(existing) => {
+            if !force {
+                anyhow::bail!(
+                    "Secret '{}' already exists. Re-run with --force to replace it, or use \
+                     `swarmctl edit secret {}`.",
+                    secret_name,
+                    secret_name
+                );
+            }
+            let id = existing
+                .id
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Secret '{}' has no id", secret_name))?;
+            let version = existing.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
+            let opts = bollard::query_parameters::UpdateSecretOptionsBuilder::default()
+                .version(version)
+                .build();
+            client.inner().update_secret(&id, spec, opts).await?;
+            let updated = client
+                .inner()
+                .inspect_secret(&secret_name)
+                .await
+                .unwrap_or(existing);
+            report_updated("Secret", &secret_name, &updated, &output)?;
         }
-    } else {
-        client.inner().create_secret(spec).await?;
-        println!("Secret '{}' created", secret_name);
+        None => {
+            let result = client.inner().create_secret(spec).await?;
+            report_created("Secret", &secret_name, &result, &output)?;
+        }
     }
 
     Ok(())

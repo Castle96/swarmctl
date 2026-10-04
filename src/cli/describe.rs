@@ -20,41 +20,24 @@ pub async fn run(
             ResourceType::Stacks => describe_stack(client, &name, output).await?,
         }
     } else if let Some(sel) = selector {
+        // Describe from the listing that was already fetched. The previous code
+        // filtered the list, then called describe_<kind>() per match, and each of
+        // those re-listed everything — so N matches cost N+1 full API listings.
         match resource {
             ResourceType::Services => {
                 let services = crate::api::service::list_services(client.inner()).await?;
-                let matching: Vec<_> = services
-                    .into_iter()
-                    .filter(|s| {
-                        matches_selector(&s.spec.as_ref().and_then(|sp| sp.labels.clone()), &sel)
-                    })
-                    .collect();
-                for service in matching {
-                    let svc_name = service
-                        .spec
-                        .as_ref()
-                        .and_then(|sp| sp.name.as_ref())
-                        .unwrap_or(&"unknown".to_string())
-                        .clone();
-                    describe_service(client, &svc_name, output).await?;
+                for service in services.into_iter().filter(|s| {
+                    matches_selector(&s.spec.as_ref().and_then(|sp| sp.labels.clone()), &sel)
+                }) {
+                    describe_service_object(&service, output)?;
                 }
             }
             ResourceType::Nodes => {
                 let nodes = crate::api::node::list_nodes(client.inner()).await?;
-                let matching: Vec<_> = nodes
-                    .into_iter()
-                    .filter(|n| {
-                        matches_selector(&n.spec.as_ref().and_then(|sp| sp.labels.clone()), &sel)
-                    })
-                    .collect();
-                for node in matching {
-                    let node_name = node
-                        .spec
-                        .as_ref()
-                        .and_then(|sp| sp.name.as_ref())
-                        .unwrap_or(&"unknown".to_string())
-                        .clone();
-                    describe_node(client, &node_name, output).await?;
+                for node in nodes.into_iter().filter(|n| {
+                    matches_selector(&n.spec.as_ref().and_then(|sp| sp.labels.clone()), &sel)
+                }) {
+                    describe_node_object(&node, output)?;
                 }
             }
             _ => {
@@ -70,20 +53,8 @@ pub async fn run(
     Ok(())
 }
 
-async fn describe_node(
-    client: &DockerClient,
-    name: &str,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    let nodes = crate::api::node::list_nodes(client.inner()).await?;
-    let node = nodes
-        .into_iter()
-        .find(|n| {
-            n.id.as_ref() == Some(&name.to_string())
-                || n.spec.as_ref().and_then(|s| s.name.as_ref()) == Some(&name.to_string())
-        })
-        .ok_or_else(|| anyhow::anyhow!("Node {} not found", name))?;
-
+/// Render an already-fetched node.
+fn describe_node_object(node: &bollard::models::Node, output: OutputFormat) -> anyhow::Result<()> {
     match output {
         OutputFormat::Table => {
             let spec = node.spec.clone().unwrap_or_default();
@@ -153,17 +124,27 @@ async fn describe_node(
     Ok(())
 }
 
-async fn describe_service(
+async fn describe_node(
     client: &DockerClient,
     name: &str,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let service = services
+    let nodes = crate::api::node::list_nodes(client.inner()).await?;
+    let node = nodes
         .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|spec| spec.name.as_ref()) == Some(&name.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("Service {} not found", name))?;
+        .find(|n| {
+            n.id.as_ref() == Some(&name.to_string())
+                || n.spec.as_ref().and_then(|s| s.name.as_ref()) == Some(&name.to_string())
+        })
+        .ok_or_else(|| anyhow::anyhow!("Node {} not found", name))?;
+    describe_node_object(&node, output)
+}
 
+/// Render an already-fetched service.
+fn describe_service_object(
+    service: &bollard::models::Service,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
     match output {
         OutputFormat::Table => {
             let spec = service.spec.clone().unwrap_or_default();
@@ -246,6 +227,19 @@ async fn describe_service(
     }
 
     Ok(())
+}
+
+async fn describe_service(
+    client: &DockerClient,
+    name: &str,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let services = crate::api::service::list_services(client.inner()).await?;
+    let service = services
+        .into_iter()
+        .find(|s| s.spec.as_ref().and_then(|spec| spec.name.as_ref()) == Some(&name.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("Service {} not found", name))?;
+    describe_service_object(&service, output)
 }
 
 async fn describe_task(

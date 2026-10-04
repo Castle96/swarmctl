@@ -10,12 +10,10 @@ pub async fn run_ls(client: &DockerClient, output: OutputFormat) -> anyhow::Resu
     let rows: Vec<VolumeRow> = volumes
         .into_iter()
         .map(|v| {
-            let labels = v
-                .labels
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(", ");
+            // Use the shared formatter so labels are sorted and delimited the
+            // same way everywhere; this built them inline from a HashMap, so the
+            // order varied between runs and differed from other commands.
+            let labels = crate::utils::selectors::format_labels(&Some(v.labels));
 
             VolumeRow {
                 name: v.name,

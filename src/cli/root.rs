@@ -552,9 +552,13 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Force replace (delete and recreate)
+        /// Replace an existing resource of the same name
         #[arg(long)]
         force: bool,
+
+        /// Output format for the resulting object
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
     },
 
     /// Manage swarm lifecycle
@@ -1740,8 +1744,18 @@ impl Cli {
                 stdin,
                 dry_run,
                 force,
+                output: replace_output,
             } => {
-                replace::run(client, resource, filename, stdin, dry_run, force).await?;
+                replace::run(
+                    client,
+                    resource,
+                    filename,
+                    stdin,
+                    dry_run,
+                    force,
+                    replace_output.unwrap_or(cli.output),
+                )
+                .await?;
             }
             Commands::DiffClusters {
                 left,

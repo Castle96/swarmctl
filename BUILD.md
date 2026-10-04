@@ -113,7 +113,7 @@ silently discarded have been removed, and a test guards against their return.
 |---|---|
 | `get` | Display one or many resources |
 | `describe` | Show detailed information about a resource |
-| `apply` / `replace` / `patch` / `diff` / `edit` | Declarative management |
+| `apply` / `replace` / `patch` / `diff` / `edit` | Declarative management. `apply` creates or updates; networks cannot be updated in place and are left alone. |
 | `create` / `delete` | Imperative management |
 | `scale` / `rollout` | Change service replica counts |
 | `logs` / `exec` / `attach` / `cp` | Container interaction |

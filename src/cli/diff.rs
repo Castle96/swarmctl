@@ -47,16 +47,28 @@ pub async fn run(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
+    let differs = !output.status.success();
+
     if !stdout.is_empty() {
-        println!("{}", stdout);
+        print!("{}", stdout);
     }
     if !stderr.is_empty() {
         eprintln!("{}", stderr);
     }
 
-    if output.status.success() {
+    // `diff` is only useful in a script if it follows the same convention as the
+    // system tool: 0 when the inputs match, 1 when they differ. It previously
+    // always exited 0, so `diff ... && deploy` passed on a mismatch.
+    if !differs {
         println!("No differences");
+        return Ok(());
     }
 
-    Ok(())
+    // A diff exit code of 2 means the tool itself failed (missing binary, bad
+    // arguments), which should not masquerade as "files differ".
+    if output.status.code() == Some(2) {
+        anyhow::bail!("`diff` exited with an error (code 2). Is the diff tool installed?");
+    }
+
+    std::process::exit(1);
 }

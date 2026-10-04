@@ -9,17 +9,9 @@ pub async fn run_ls(client: &DockerClient, output: OutputFormat) -> anyhow::Resu
     let rows: Vec<crate::models::config::ConfigRow> = configs
         .into_iter()
         .map(|c| {
-            let labels = c
-                .spec
-                .as_ref()
-                .and_then(|spec| spec.labels.clone())
-                .map(|l| {
-                    l.iter()
-                        .map(|(k, v)| format!("{}={}", k, v))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_default();
+            let labels = crate::utils::selectors::format_labels(
+                &c.spec.as_ref().and_then(|spec| spec.labels.clone()),
+            );
             crate::models::config::ConfigRow {
                 id: c.id.unwrap_or_default(),
                 name: c.spec.unwrap_or_default().name.unwrap_or_default(),
