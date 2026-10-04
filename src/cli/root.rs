@@ -1,9 +1,9 @@
 use crate::api::client::DockerClient;
 use crate::cli::{
     api_resources, apply, attach, cluster, completion, config, context, cordon, cp, create, delete,
-    describe, diff, discover, edit, events, exec, explain, failover, get, label, logs, patch,
-    port_forward, ports, replace, rollout, run, scale, set, stack, swarm, system, taint, top,
-    vault, volume, wait,
+    describe, diff, discover, edit, endpoint, events, exec, explain, failover, get, label, logs,
+    patch, port_forward, ports, replace, rollout, run, scale, set, stack, swarm, system, taint,
+    top, vault, volume, wait,
 };
 #[cfg(feature = "tui")]
 use crate::tui;
@@ -61,7 +61,7 @@ pub struct Cli {
     command: Commands,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     Table,
     Json,
@@ -70,7 +70,7 @@ pub enum OutputFormat {
     Name,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 enum Commands {
     /// Display one or many resources
     Get {
@@ -625,6 +625,12 @@ enum Commands {
         command: SystemCommand,
     },
 
+    /// Manage named remote endpoints (clusters)
+    Endpoint {
+        #[command(subcommand)]
+        command: EndpointCommand,
+    },
+
     /// Manage container failover and data migration
     Failover {
         #[command(subcommand)]
@@ -632,7 +638,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum StackCommand {
     /// Deploy a stack from a compose file
     Deploy {
@@ -652,7 +658,7 @@ pub enum StackCommand {
     Ls,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum ContextCommand {
     /// List available Docker contexts
     Ls,
@@ -706,7 +712,7 @@ pub enum ContextCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum SwarmCommand {
     /// Initialize a new swarm on this node
     Init {
@@ -751,7 +757,7 @@ pub enum SwarmCommand {
     Status,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum VaultCommand {
     /// Create a new local vault
     Init,
@@ -761,9 +767,31 @@ pub enum VaultCommand {
     Unlock,
     /// Change the vault password
     SetKey,
+    /// List stored credentials per endpoint
+    Ls {
+        /// Output format
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
+    },
+    /// Store join tokens for an endpoint
+    Store {
+        /// Endpoint name (as registered with `swarmctl endpoint add`)
+        endpoint: String,
+        /// Worker join token
+        #[arg(long)]
+        worker_token: Option<String>,
+        /// Manager join token
+        #[arg(long)]
+        manager_token: Option<String>,
+    },
+    /// Remove stored credentials for an endpoint
+    Rm {
+        /// Endpoint name
+        endpoint: String,
+    },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum VolumeCommand {
     /// List volumes
     Ls {
@@ -800,7 +828,7 @@ pub enum VolumeCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum SystemCommand {
     /// Show Docker system information
     Info {
@@ -814,7 +842,118 @@ pub enum SystemCommand {
     Ping,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
+pub enum EndpointCommand {
+    /// List registered endpoints
+    Ls {
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "table")]
+        output: OutputFormat,
+
+        /// Emit JSON regardless of --output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Register a new endpoint
+    Add {
+        /// Endpoint name (e.g. prod-eu)
+        name: String,
+
+        /// Docker host (tcp://, ssh:// or unix://)
+        #[arg(long)]
+        host: String,
+
+        /// Human-readable description
+        #[arg(long, short = 'd')]
+        description: Option<String>,
+
+        /// Logical site, e.g. eu-west
+        #[arg(long)]
+        site: Option<String>,
+
+        /// Environment: prod, staging, dev, ...
+        #[arg(long = "env")]
+        environment: Option<String>,
+
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Vec<String>,
+
+        /// Path to the TLS CA certificate
+        #[arg(long)]
+        tlscacert: Option<String>,
+
+        /// Path to the TLS client certificate
+        #[arg(long)]
+        tlscert: Option<String>,
+
+        /// Path to the TLS client key
+        #[arg(long)]
+        tlskey: Option<String>,
+
+        /// Make this the default endpoint for fan-out
+        #[arg(long)]
+        default: bool,
+
+        /// Also create a matching Docker context
+        #[arg(long)]
+        sync: bool,
+    },
+
+    /// Remove an endpoint
+    Rm {
+        /// Endpoint name
+        name: String,
+
+        /// Also remove the matching Docker context
+        #[arg(long)]
+        sync: bool,
+    },
+
+    /// Show one endpoint in detail
+    Inspect {
+        /// Endpoint name
+        name: String,
+
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Check reachability and swarm state of endpoints
+    Health {
+        /// Comma-separated endpoint names (default: every endpoint)
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "table")]
+        output: OutputFormat,
+
+        /// Re-probe every 5 seconds
+        #[arg(short, long)]
+        watch: bool,
+    },
+
+    /// Import existing Docker contexts as endpoints
+    Import {
+        /// Also delete Docker contexts with no matching endpoint
+        #[arg(long)]
+        prune: bool,
+    },
+
+    /// Make an endpoint the default for fan-out
+    Use {
+        /// Endpoint name
+        name: String,
+    },
+
+    /// Write Docker contexts for all registered endpoints
+    Sync,
+}
+
+#[derive(Clone, Subcommand)]
 pub enum FailoverCommand {
     /// Show failover status and events
     Status {
@@ -842,7 +981,7 @@ pub enum FailoverCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum ConfigCommand {
     /// List configs
     Ls,
@@ -874,7 +1013,7 @@ pub enum ConfigCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum RolloutCommand {
     /// View rollout status
     Status {
@@ -949,7 +1088,7 @@ impl std::fmt::Display for ResourceType {
     }
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum TopCommand {
     /// Show processes in service containers
     Service {
@@ -973,7 +1112,7 @@ pub enum TopCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 pub enum SetCommand {
     /// Set the image of a service
     Image {
@@ -1142,13 +1281,71 @@ impl Cli {
             return Ok(());
         }
 
+        // Local-only command groups run before a Docker connection is required:
+        // managing the endpoint registry is most useful precisely when no daemon
+        // is reachable, and `endpoint health` builds its own per-endpoint clients.
+        match cli.command {
+            Commands::Endpoint { command } => {
+                Self::dispatch_endpoint(command).await?;
+                return Ok(());
+            }
+            Commands::Context { command } => {
+                Self::dispatch_context(command, cli.output).await?;
+                return Ok(());
+            }
+            Commands::Vault { command } => {
+                Self::dispatch_vault(command, cli.output).await?;
+                return Ok(());
+            }
+            Commands::Completion { shell } => {
+                completion::run(shell);
+                return Ok(());
+            }
+            Commands::Version => {
+                println!("swarmctl version {}", env!("CARGO_PKG_VERSION"));
+                println!("Docker API version: {}", bollard::API_DEFAULT_VERSION);
+                return Ok(());
+            }
+            Commands::ApiResources => {
+                api_resources::run().await?;
+                return Ok(());
+            }
+            Commands::Explain {
+                resource,
+                recursive: _,
+                api_version: _,
+            } => {
+                explain::run(resource.map(|r| r.to_string())).await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+
         let client = client.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "Docker daemon is not available. Please install Docker or set DOCKER_HOST."
             )
         })?;
 
-        match cli.command {
+        Self::dispatch(&cli, cli.command.clone(), client).await
+    }
+
+    /// Execute a command against an already-connected client.
+    ///
+    /// Split out from `run` so the same command can be replayed against several
+    /// endpoints for fan-out, which requires `Commands: Clone`.
+    async fn dispatch(cli: &Cli, command: Commands, client: &DockerClient) -> anyhow::Result<()> {
+        match command {
+            // Dispositioned above, before a Docker connection was required.
+            Commands::Endpoint { .. }
+            | Commands::Context { .. }
+            | Commands::Vault { .. }
+            | Commands::Completion { .. }
+            | Commands::Version
+            | Commands::ApiResources
+            | Commands::Explain { .. } => {
+                unreachable!("local-only command groups are handled before the client is built")
+            }
             Commands::Get {
                 resource,
                 name,
@@ -1289,41 +1486,6 @@ impl Cli {
             Commands::Dashboard => {
                 crate::tui::run_tui(Some(client)).await?;
             }
-            Commands::Context { command } => match command {
-                ContextCommand::Ls => {
-                    context::run_ls(cli.output).await?;
-                }
-                ContextCommand::Use { name } => {
-                    context::run_use(name).await?;
-                }
-                ContextCommand::Inspect { name, output } => {
-                    let output = output.unwrap_or(cli.output);
-                    context::run_inspect(name, output).await?;
-                }
-                ContextCommand::Create {
-                    name,
-                    host,
-                    docker_api_version,
-                    skip_tls_verify,
-                    tlscacert,
-                    tlscert,
-                    tlskey,
-                } => {
-                    context::run_create(
-                        name,
-                        host,
-                        docker_api_version,
-                        skip_tls_verify,
-                        tlscacert,
-                        tlscert,
-                        tlskey,
-                    )
-                    .await?;
-                }
-                ContextCommand::Rm { name } => {
-                    context::run_rm(name).await?;
-                }
-            },
             Commands::Apply {
                 resource,
                 name,
@@ -1401,13 +1563,6 @@ impl Cli {
                     rollout::run_resume(client, service).await?;
                 }
             },
-            Commands::Version => {
-                println!("swarmctl version {}", env!("CARGO_PKG_VERSION"));
-                println!("Docker API version: {}", bollard::API_DEFAULT_VERSION);
-            }
-            Commands::Completion { shell } => {
-                completion::run(shell);
-            }
             Commands::Label {
                 resource,
                 name,
@@ -1475,14 +1630,6 @@ impl Cli {
             Commands::Uncordon { name } => {
                 cordon::run_uncordon(client, name).await?;
             }
-            Commands::Explain {
-                resource,
-                recursive: _,
-                api_version: _,
-            } => {
-                let resource_str = resource.map(|r| r.to_string());
-                explain::run(resource_str).await?;
-            }
             Commands::Wait {
                 resource,
                 name,
@@ -1532,9 +1679,6 @@ impl Cli {
                     config::run_view(client, name).await?;
                 }
             },
-            Commands::ApiResources => {
-                api_resources::run().await?;
-            }
             Commands::Taint {
                 name,
                 taints,
@@ -1575,20 +1719,6 @@ impl Cli {
                 }
                 SwarmCommand::Status => {
                     swarm::run_status(client).await?;
-                }
-            },
-            Commands::Vault { command } => match command {
-                VaultCommand::Init => {
-                    vault::run_init().await?;
-                }
-                VaultCommand::Status => {
-                    vault::run_status().await?;
-                }
-                VaultCommand::Unlock => {
-                    vault::run_unlock().await?;
-                }
-                VaultCommand::SetKey => {
-                    vault::run_set_key().await?;
                 }
             },
             Commands::Discover {
@@ -1673,6 +1803,122 @@ impl Cli {
             },
         }
 
+        Ok(())
+    }
+
+    /// Endpoint management never needs a Docker connection.
+    async fn dispatch_endpoint(command: EndpointCommand) -> anyhow::Result<()> {
+        match command {
+            EndpointCommand::Ls { output, json } => {
+                let output = if json { OutputFormat::Json } else { output };
+                endpoint::run_ls(output, json).await?;
+            }
+            EndpointCommand::Add {
+                name,
+                host,
+                description,
+                site,
+                environment,
+                tags,
+                tlscacert,
+                tlscert,
+                tlskey,
+                default,
+                sync,
+            } => {
+                endpoint::run_add(
+                    name,
+                    host,
+                    description,
+                    site,
+                    environment,
+                    tags,
+                    tlscacert,
+                    tlscert,
+                    tlskey,
+                    default,
+                    sync,
+                )
+                .await?;
+            }
+            EndpointCommand::Rm { name, sync } => endpoint::run_rm(name, sync).await?,
+            EndpointCommand::Inspect { name, output } => {
+                endpoint::run_inspect(name, output).await?
+            }
+            EndpointCommand::Health {
+                endpoint: names,
+                output,
+                watch,
+            } => endpoint::run_health(names, output, watch).await?,
+            EndpointCommand::Import { prune } => endpoint::run_import(prune).await?,
+            EndpointCommand::Use { name } => endpoint::run_use(name).await?,
+            EndpointCommand::Sync => endpoint::run_sync().await?,
+        }
+        Ok(())
+    }
+
+    /// Docker context management is local-only (it edits ~/.docker).
+    async fn dispatch_context(
+        command: ContextCommand,
+        default_output: OutputFormat,
+    ) -> anyhow::Result<()> {
+        match command {
+            ContextCommand::Ls => context::run_ls(default_output).await?,
+            ContextCommand::Use { name } => context::run_use(name).await?,
+            ContextCommand::Inspect { name, output } => {
+                context::run_inspect(name, output.unwrap_or(default_output)).await?
+            }
+            ContextCommand::Create {
+                name,
+                host,
+                docker_api_version,
+                skip_tls_verify,
+                tlscacert,
+                tlscert,
+                tlskey,
+            } => {
+                context::run_create(
+                    name,
+                    host,
+                    docker_api_version,
+                    skip_tls_verify,
+                    tlscacert,
+                    tlscert,
+                    tlskey,
+                )
+                .await?
+            }
+            ContextCommand::Rm { name } => context::run_rm(name).await?,
+        }
+        Ok(())
+    }
+
+    /// The vault is a local encrypted file; no daemon required.
+    async fn dispatch_vault(
+        command: VaultCommand,
+        default_output: OutputFormat,
+    ) -> anyhow::Result<()> {
+        match command {
+            VaultCommand::Init => vault::run_init().await?,
+            VaultCommand::Status => vault::run_status().await?,
+            VaultCommand::Unlock => vault::run_unlock().await?,
+            VaultCommand::SetKey => vault::run_set_key().await?,
+            VaultCommand::Ls { output } => vault::run_ls(output.unwrap_or(default_output)).await?,
+            VaultCommand::Store {
+                endpoint,
+                manager_token,
+                worker_token,
+            } => {
+                vault::run_store(
+                    &endpoint,
+                    worker_token.as_deref(),
+                    manager_token.as_deref(),
+                    default_output,
+                )
+                .await?
+            }
+            VaultCommand::Rm { endpoint } => vault::run_rm(&endpoint).await?,
+        }
         Ok(())
     }
 

@@ -46,7 +46,7 @@ pub struct Endpoint {
     pub tls: Option<TlsConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct TlsConfig {
     #[serde(rename = "CAFile", default)]

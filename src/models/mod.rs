@@ -1,5 +1,6 @@
 pub mod config;
 pub mod context;
+pub mod endpoint;
 pub mod failover;
 pub mod network;
 pub mod node;

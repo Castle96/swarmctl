@@ -169,8 +169,9 @@ async fn maybe_save_to_vault(
             worker: worker_token.to_string(),
             manager: manager_token.unwrap_or_default().to_string(),
         };
-        vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
-        println!("Tokens saved to vault.");
+        let endpoint = crate::api::endpoints::current_endpoint_key();
+        vault.store_swarm_tokens(&endpoint, tokens, None, &host, &swarm_name)?;
+        println!("Tokens saved to vault under '{}'.", endpoint);
     }
     Ok(())
 }

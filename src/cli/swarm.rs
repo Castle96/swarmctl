@@ -53,10 +53,11 @@ pub async fn run_init(client: &DockerClient, advertise_addr: Option<String>) -> 
     let host =
         std::env::var("DOCKER_HOST").unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
     let swarm_name = info_name(client).await;
-    vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
+    let endpoint = crate::api::endpoints::current_endpoint_key();
+    vault.store_swarm_tokens(&endpoint, tokens, None, &host, &swarm_name)?;
 
     println!();
-    println!("Join tokens saved to vault.");
+    println!("Join tokens saved to vault under '{}'.", endpoint);
 
     Ok(())
 }
@@ -125,13 +126,16 @@ pub async fn run_token(
             let vault_password = rpassword::prompt_password("Vault password (to update tokens): ")?;
             if !vault_password.is_empty() {
                 let vault = crate::vault::LocalVault::open(&vault_password);
+                let endpoint = crate::api::endpoints::current_endpoint_key();
                 match vault {
                     Ok(mut v) => {
-                        v.rotate_tokens(new_tokens.clone())?;
-                        println!("Tokens updated in vault.");
+                        v.rotate_tokens(&endpoint, new_tokens.clone())?;
+                        println!("Tokens updated in vault under '{}'.", endpoint);
                     }
                     Err(e) => {
-                        println!("Warning: could not update vault: {}", e);
+                        // Previously printed to stdout and continued, so the user
+                        // ended up with rotated daemon tokens and a stale vault.
+                        eprintln!("Warning: could not update vault: {}", e);
                     }
                 }
             }

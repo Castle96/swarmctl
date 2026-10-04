@@ -13,6 +13,7 @@ pub mod describe;
 pub mod diff;
 pub mod discover;
 pub mod edit;
+pub mod endpoint;
 pub mod events;
 pub mod exec;
 pub mod explain;

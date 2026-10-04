@@ -40,9 +40,15 @@ pub fn failover_file() -> PathBuf {
 /// directory would expose it even if the file mode is tight.
 pub fn ensure_swarmctl_dir() -> std::io::Result<PathBuf> {
     let dir = swarmctl_dir();
-    std::fs::create_dir_all(&dir)?;
-    restrict(&dir)?;
+    ensure_swarmctl_dir_at(&dir)?;
     Ok(dir)
+}
+
+/// Create `dir` with owner-only permissions.
+pub fn ensure_swarmctl_dir_at(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    restrict(dir)?;
+    Ok(())
 }
 
 #[cfg(unix)]

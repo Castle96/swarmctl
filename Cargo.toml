@@ -35,4 +35,5 @@ argon2 = "0.5"
 rpassword = "7"
 directories = "5"
 zeroize = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 rand = "0.8"
