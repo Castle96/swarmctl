@@ -2420,6 +2420,39 @@ mod tests {
         );
     }
 
+    /// `explain` and `api-resources` share one resource list, and it must cover
+    /// every resource the parser accepts — otherwise `get <kind>` works while
+    /// `explain <kind>` does not.
+    #[test]
+    fn documented_resources_cover_every_resource_type() {
+        use crate::cli::explain;
+        use crate::cli::root::ResourceType;
+
+        let documented: Vec<&str> = explain::SHORT_NAMES.iter().map(|(n, _)| *n).collect();
+
+        for r in [
+            ResourceType::Nodes,
+            ResourceType::Services,
+            ResourceType::Tasks,
+            ResourceType::Networks,
+            ResourceType::Secrets,
+            ResourceType::Configs,
+            ResourceType::Stacks,
+        ] {
+            let name = format!("{:?}", r).to_lowercase();
+            assert!(
+                documented.contains(&name.as_str()),
+                "{:?} is missing from explain / api-resources",
+                r
+            );
+        }
+
+        for (name, short) in explain::SHORT_NAMES {
+            assert!(!short.is_empty(), "{} has no short name", name);
+            assert!(!short.contains(' '), "{}'s short name has a space", name);
+        }
+    }
+
     #[test]
     fn shell_completions_generate_for_all_shells() {
         use clap_complete::Shell;

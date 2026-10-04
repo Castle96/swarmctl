@@ -94,8 +94,11 @@ pub async fn run(
             break;
         }
 
-        print!("\x1B[2J\x1B[1;1H");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Clear after the pause, immediately before redrawing. Clearing here
+        // meant the table was visible for microseconds and the screen was then
+        // blank for two seconds, which reads as a flicker.
+        print!("\x1B[2J\x1B[1;1H");
     }
 
     Ok(())

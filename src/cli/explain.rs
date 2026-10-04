@@ -1,19 +1,25 @@
+/// Resource kinds `explain` can describe, with their short names.
+///
+/// Single source of truth: `api-resources` renders from this, and a test asserts
+/// it covers every `ResourceType` variant, so neither table can drift from the
+/// CLI's actual resource list.
+pub const SHORT_NAMES: &[(&str, &str)] = &[
+    ("nodes", "no"),
+    ("services", "svc"),
+    ("tasks", "po"),
+    ("networks", "net"),
+    ("secrets", "sec"),
+    ("configs", "cm"),
+    ("stacks", "st"),
+];
+
 pub async fn run(resource: Option<String>) -> anyhow::Result<()> {
     match resource.as_deref() {
         None | Some("help") => {
             println!("Resource Types:");
-            println!("  nodes     - Docker Swarm nodes");
-            println!("  services  - Docker Swarm services");
-            println!("  tasks     - Docker Swarm tasks");
-            println!("  networks  - Docker Swarm networks");
-            println!("  secrets   - Docker Swarm secrets");
-            println!("  configs   - Docker Swarm configs");
-            println!("  stacks    - Docker Swarm stacks");
-            println!();
-            println!("Short names:");
-            println!("  no, nodes      svc, services    po, tasks");
-            println!("  net, networks  sec, secrets     cm, configs");
-            println!("  st, stacks");
+            for (name, short) in SHORT_NAMES {
+                println!("  {:<10} ({}) - Docker Swarm {}", name, short, name);
+            }
             println!();
             println!("Use 'swarmctl explain <resource>' for field details.");
         }
