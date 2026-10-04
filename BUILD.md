@@ -102,7 +102,12 @@ swarmctl <command> --help    # per-command flags
 swarmctl explain services    # fields available to --field-selector / --sort-by
 ```
 
-Common commands:
+swarmctl has no flag that parses and then does nothing: options it cannot
+honour (such as `context create --skip-tls-verify`) are rejected with an
+explanation rather than accepted and ignored. Flags that used to be accepted and
+silently discarded have been removed, and a test guards against their return.
+
+## Command reference
 
 | Command | Description |
 |---|---|

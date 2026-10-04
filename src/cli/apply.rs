@@ -1,5 +1,6 @@
 use crate::api::client::DockerClient;
-use crate::cli::root::ResourceType;
+use crate::cli::root::{OutputFormat, ResourceType};
+use crate::utils::printer::{report_created, report_updated};
 
 pub async fn run(
     client: &DockerClient,
@@ -8,12 +9,21 @@ pub async fn run(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     match resource {
-        ResourceType::Services => apply_service(client, name, filename, stdin, dry_run).await?,
-        ResourceType::Configs => apply_config(client, name, filename, stdin, dry_run).await?,
-        ResourceType::Secrets => apply_secret(client, name, filename, stdin, dry_run).await?,
-        ResourceType::Networks => apply_network(client, name, filename, stdin, dry_run).await?,
+        ResourceType::Services => {
+            apply_service(client, name, filename, stdin, dry_run, output).await?
+        }
+        ResourceType::Configs => {
+            apply_config(client, name, filename, stdin, dry_run, output).await?
+        }
+        ResourceType::Secrets => {
+            apply_secret(client, name, filename, stdin, dry_run, output).await?
+        }
+        ResourceType::Networks => {
+            apply_network(client, name, filename, stdin, dry_run, output).await?
+        }
         _ => {
             return Err(anyhow::anyhow!(
                 "apply is not yet supported for {:?}",
@@ -62,6 +72,7 @@ async fn apply_service(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let spec_value = read_spec(filename, stdin)?;
     let spec_json = spec_to_json(&spec_value)?;
@@ -88,18 +99,23 @@ async fn apply_service(
         let opts = bollard::query_parameters::UpdateServiceOptionsBuilder::default()
             .version(version)
             .build();
+        // Re-inspect so the reported object reflects the update, not the request.
         client
             .inner()
             .update_service(&service_name, spec, opts, None)
             .await?;
-        println!("Service '{}' updated", service_name);
+        let updated = client
+            .inner()
+            .inspect_service(&service_name, None)
+            .await
+            .ok();
+        match updated {
+            Some(service) => report_updated("Service", &service_name, &service, &output)?,
+            None => println!("Service '{}' updated", service_name),
+        }
     } else {
         let result = client.inner().create_service(spec, None).await?;
-        println!(
-            "Service '{}' created (ID: {})",
-            service_name,
-            result.id.unwrap_or_default()
-        );
+        report_created("Service", &service_name, &result, &output)?;
     }
 
     Ok(())
@@ -111,6 +127,7 @@ async fn apply_config(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let spec_value = read_spec(filename, stdin)?;
     let spec_json = spec_to_json(&spec_value)?;
@@ -138,8 +155,8 @@ async fn apply_config(
             config_name
         );
     } else {
-        client.inner().create_config(spec).await?;
-        println!("Config '{}' created", config_name);
+        let result = client.inner().create_config(spec).await?;
+        report_created("Config", &config_name, &result, &output)?;
     }
 
     Ok(())
@@ -151,6 +168,7 @@ async fn apply_secret(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let spec_value = read_spec(filename, stdin)?;
     let spec_json = spec_to_json(&spec_value)?;
@@ -178,8 +196,8 @@ async fn apply_secret(
             secret_name
         );
     } else {
-        client.inner().create_secret(spec).await?;
-        println!("Secret '{}' created", secret_name);
+        let result = client.inner().create_secret(spec).await?;
+        report_created("Secret", &secret_name, &result, &output)?;
     }
 
     Ok(())
@@ -191,6 +209,7 @@ async fn apply_network(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let spec_value = read_spec(filename, stdin)?;
     let spec_json = spec_to_json(&spec_value)?;
@@ -218,8 +237,8 @@ async fn apply_network(
     if existing.is_some() {
         println!("Network '{}' already exists, skipping", network_name);
     } else {
-        client.inner().create_network(spec).await?;
-        println!("Network '{}' created", network_name);
+        let result = client.inner().create_network(spec).await?;
+        report_created("Network", &network_name, &result, &output)?;
     }
 
     Ok(())

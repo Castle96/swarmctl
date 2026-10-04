@@ -180,6 +180,75 @@ See [Local vault](#local-vault).
 | Multi-cluster | `diff-clusters`, plus `--endpoints` on any command |
 | Meta | `version`, `completion`, `help` |
 
+### Global flags
+
+Accepted before or after the subcommand.
+
+| Flag | Purpose |
+|---|---|
+| `-o, --output` | `table` (default), `json`, `yaml`, `wide`, `name`. Machine formats suppress the connection banner so output stays pipeable. |
+| `-w, --watch` | Re-render periodically. Only `get` acts on it. |
+| `--host` | Daemon address; also read from `$DOCKER_HOST`. |
+| `-c, --context` | Docker context; also read from `$DOCKER_CONTEXT`. Takes precedence over `--host`. |
+| `--tlscacert`, `--tlscert`, `--tlskey` | TLS material. All three are required together. |
+| `--endpoints` | Run against named endpoints. See [Fan-out](#fan-out). |
+| `-y, --yes` | Assume yes for write fan-out. Required in non-interactive use. |
+| `-v` | Verbosity (repeatable). |
+
+### Per-command flags worth knowing
+
+| Command | Flag | Purpose |
+|---|---|---|
+| `get` | `--selector` | Label selector, `key=value` |
+| `get` | `--field-selector` | Field selector against the raw API object |
+| `get` | `--sort-by` | Sort by a row field; numerics sort numerically |
+| `get` | `--show-labels` | Print labels after each row |
+| `delete` | `--dry-run` | Report what would be deleted |
+| `delete` | `--selector` | Delete everything matching a label |
+| `delete` | `--ignore-not-found` | Exit 0 when already absent |
+| `delete` | `--grace-period` | Container shutdown grace period, applied to the service before removal |
+| `delete` | `--wait`, `--timeout` | Block until the resource is really gone (default bound 60s) |
+| `logs` | `--follow` | Stream |
+| `logs` | `--tail` | Lines of history; `0` means all |
+| `logs` | `--timestamps` | Prefix each line with its timestamp |
+| `logs` | `--previous` | Read the previous (crashed) task's logs |
+| `logs` | `--prefix` | Prefix each line with the resource name |
+| `logs` | `--ignore-errors` | Continue past per-line read errors |
+| `ports` | `--available` | Show free ports in a range |
+| `ports` | `--range-start`, `--range-end` | Range to scan (default 30000-40000) |
+| `ports` | `--protocol` | `tcp` or `udp` |
+| `patch` | `--patch` | Inline JSON, or `@file` to read from a file |
+| `patch` | `--patch-type` | Only `merge` (RFC 7386) |
+| `patch` | `--dry-run` | Show the resulting spec without applying |
+| `run` | `--publish` | `container`, `host:container`, either with `/proto` |
+| `run` | `--network` | Attach to an existing network by name |
+| `run` | `--env`, `--labels` | `KEY=VALUE`; malformed entries are rejected |
+| `wait` | `--condition` | Per-resource; an unknown condition is an error |
+| `wait` | `--timeout` | Seconds to wait |
+| `events` | `--filter-type` | Filter by event type |
+| `label` | `--overwrite` | Replace all labels instead of merging |
+| `label` | `--all` | Remove every label |
+| `taint` | `--remove` | Remove a taint by key |
+| `taint` | `--overwrite` | Replace all taints |
+| `diff-clusters` | `--resource` | `nodes`, `services`, `networks`, `secrets`, `configs`, `stacks` |
+
+Run `swarmctl <command> --help` for the full list. swarmctl has no flag
+that parses and then does nothing: options it cannot honour are rejected with
+an explanation rather than accepted and ignored.
+
+### Deleting
+
+`swarmctl delete` removes the resource. Two behaviours are worth knowing:
+
+- `delete services --wait` blocks until the service is really gone. Docker
+  returns from the delete call before teardown finishes, so a script that deletes
+  and immediately re-creates otherwise races it.
+- `delete nodes` **drains** rather than removes. Removing a node from a swarm is
+  not exposed by the Docker API client in use, and draining is the safe
+  equivalent — new tasks stop being scheduled while running tasks finish. The
+  output says `drained`, not `deleted`. Use the Docker CLI if the node itself
+  must be removed.
+
 ### Resource types
 
 `get` and `describe` accept these, with short names:

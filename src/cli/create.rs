@@ -1,5 +1,6 @@
 use crate::api::client::DockerClient;
-use crate::cli::root::ResourceType;
+use crate::cli::root::{OutputFormat, ResourceType};
+use crate::utils::printer::report_created;
 use std::io::{self, Read};
 
 pub async fn run(
@@ -9,12 +10,21 @@ pub async fn run(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     match resource {
-        ResourceType::Services => create_service(client, name, filename, stdin, dry_run).await?,
-        ResourceType::Networks => create_network(client, name, filename, stdin, dry_run).await?,
-        ResourceType::Secrets => create_secret(client, name, filename, stdin, dry_run).await?,
-        ResourceType::Configs => create_config(client, name, filename, stdin, dry_run).await?,
+        ResourceType::Services => {
+            create_service(client, name, filename, stdin, dry_run, output).await?
+        }
+        ResourceType::Networks => {
+            create_network(client, name, filename, stdin, dry_run, output).await?
+        }
+        ResourceType::Secrets => {
+            create_secret(client, name, filename, stdin, dry_run, output).await?
+        }
+        ResourceType::Configs => {
+            create_config(client, name, filename, stdin, dry_run, output).await?
+        }
         _ => {
             return Err(anyhow::anyhow!(
                 "Creating {} is not yet supported",
@@ -32,6 +42,7 @@ async fn create_service(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let spec_content = if stdin {
         let mut buffer = String::new();
@@ -49,20 +60,15 @@ async fn create_service(
     if let Some(name) = name {
         final_spec.name = Some(name);
     }
+    let final_name = final_spec.name.clone().unwrap_or_default();
 
     if dry_run {
-        println!(
-            "[dry run] Would create service '{}'",
-            final_spec.name.as_deref().unwrap_or("unknown")
-        );
+        println!("[dry run] Would create service '{}'", final_name);
         return Ok(());
     }
 
     let response = client.inner().create_service(final_spec, None).await?;
-    println!(
-        "Service created with ID: {}",
-        response.id.unwrap_or_default()
-    );
+    report_created("Service", &final_name, &response, &output)?;
 
     Ok(())
 }
@@ -73,6 +79,7 @@ async fn create_network(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let spec_content = if stdin {
         let mut buffer = String::new();
@@ -90,14 +97,15 @@ async fn create_network(
     if let Some(name) = name {
         final_spec.name = name;
     }
+    let final_name = final_spec.name.clone();
 
     if dry_run {
-        println!("[dry run] Would create network '{}'", final_spec.name);
+        println!("[dry run] Would create network '{}'", final_name);
         return Ok(());
     }
 
     let response = client.inner().create_network(final_spec).await?;
-    println!("Network created with ID: {}", response.id);
+    report_created("Network", &final_name, &response, &output)?;
 
     Ok(())
 }
@@ -108,6 +116,7 @@ async fn create_secret(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let data = if stdin {
         let mut buffer = Vec::new();
@@ -135,7 +144,7 @@ async fn create_secret(
     };
 
     let response = client.inner().create_secret(spec).await?;
-    println!("Secret {} created with ID: {}", secret_name, response.id);
+    report_created("Secret", &secret_name, &response, &output)?;
 
     Ok(())
 }
@@ -146,6 +155,7 @@ async fn create_config(
     filename: Option<String>,
     stdin: bool,
     dry_run: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let data = if stdin {
         let mut buffer = Vec::new();
@@ -173,7 +183,7 @@ async fn create_config(
     };
 
     let response = client.inner().create_config(spec).await?;
-    println!("Config {} created with ID: {}", config_name, response.id);
+    report_created("Config", &config_name, &response, &output)?;
 
     Ok(())
 }

@@ -76,6 +76,46 @@ pub fn sort_rows<T: Serialize + Clone>(rows: &mut Vec<T>, path: &str) -> anyhow:
     Ok(())
 }
 
+/// Report the result of a mutating command.
+///
+/// With `-o json`/`-o yaml` the daemon's response object is printed, so the
+/// output is pipeable into `jq` and the new object's ID can be captured. Text
+/// formats get the one-line human summary.
+pub fn report_created<T: Serialize>(
+    kind: &str,
+    name: &str,
+    response: &T,
+    output: &crate::cli::root::OutputFormat,
+) -> anyhow::Result<()> {
+    use crate::cli::root::OutputFormat;
+    match output {
+        OutputFormat::Json => print_json(response),
+        OutputFormat::Yaml => print_yaml(response),
+        _ => {
+            println!("{} '{}' created", kind, name);
+            Ok(())
+        }
+    }
+}
+
+/// Same as [`report_created`], for updates.
+pub fn report_updated<T: Serialize>(
+    kind: &str,
+    name: &str,
+    response: &T,
+    output: &crate::cli::root::OutputFormat,
+) -> anyhow::Result<()> {
+    use crate::cli::root::OutputFormat;
+    match output {
+        OutputFormat::Json => print_json(response),
+        OutputFormat::Yaml => print_yaml(response),
+        _ => {
+            println!("{} '{}' updated", kind, name);
+            Ok(())
+        }
+    }
+}
+
 /// Render rows exactly once, in the requested format.
 ///
 /// Sorting happens *before* rendering. Previously each list handler rendered

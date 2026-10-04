@@ -25,10 +25,6 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     watch: bool,
 
-    /// Namespace (for future use with stacks)
-    #[arg(short, long)]
-    namespace: Option<String>,
-
     /// Docker daemon host (e.g. tcp://192.168.1.100:2376, ssh://user@host, unix:///var/run/docker.sock)
     #[arg(long, env = "DOCKER_HOST")]
     host: Option<String>,
@@ -49,20 +45,12 @@ pub struct Cli {
     #[arg(long)]
     tlskey: Option<String>,
 
-    /// Skip TLS certificate verification (rejected: certificates are always verified)
-    #[arg(long)]
-    skip_tls_verify: bool,
-
     /// Comma-separated endpoint names to run this command against
     ///
     /// Registered with `swarmctl endpoint add`. Runs the command against every
     /// listed endpoint and combines the results.
     #[arg(long, global = true, value_name = "NAMES")]
     pub(crate) endpoints: Option<String>,
-
-    /// With --endpoints, include endpoints that are not marked default
-    #[arg(long, global = true, requires = "endpoints")]
-    pub(crate) all_endpoints: bool,
 
     /// Assume yes to confirmation prompts (required for write fan-out in scripts)
     #[arg(short = 'y', long, global = true)]
@@ -111,10 +99,6 @@ pub(crate) enum Commands {
         #[arg(long)]
         sort_by: Option<String>,
 
-        /// Include all namespaces
-        #[arg(short = 'A', long)]
-        all_namespaces: bool,
-
         /// Output format (table, json, yaml, wide, name)
         #[arg(short, long, value_enum)]
         output: Option<OutputFormat>,
@@ -153,9 +137,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Output format for dry run
-        #[arg(long)]
-        output: Option<String>,
+        /// Output format for the resulting object
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
     },
 
     /// Delete resources
@@ -169,10 +153,6 @@ pub(crate) enum Commands {
         /// Selector to filter resources
         #[arg(long)]
         selector: Option<String>,
-
-        /// Force deletion
-        #[arg(long)]
-        force: bool,
 
         /// Dry run mode (validate only)
         #[arg(long)]
@@ -304,9 +284,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Output format for dry run
-        #[arg(long)]
-        output: Option<String>,
+        /// Output format for the resulting object
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
     },
 
     /// Run an ad-hoc service
@@ -334,9 +314,13 @@ pub(crate) enum Commands {
         #[arg(short, long)]
         network: Option<String>,
 
-        /// Publish a port (container-port or host-port:container-port)
+        /// Publish a port: `container`, `host:container`, or either with `/proto`
         #[arg(short, long)]
         publish: Vec<String>,
+
+        /// Output format for the created service object
+        #[arg(short, long, value_enum)]
+        output: Option<OutputFormat>,
     },
 
     /// Stream Docker swarm events
@@ -425,10 +409,6 @@ pub(crate) enum Commands {
         #[arg(long)]
         all: bool,
 
-        /// Operate on all resources of the specified type
-        #[arg(long)]
-        all_resources: bool,
-
         /// Selector to filter resources
         #[arg(long)]
         selector: Option<String>,
@@ -442,16 +422,8 @@ pub(crate) enum Commands {
 
     /// Show documentation for a resource type
     Explain {
-        /// Resource type
+        /// Resource type (omit to list them all)
         resource: Option<ResourceType>,
-
-        /// Show nested fields recursively
-        #[arg(short, long)]
-        recursive: bool,
-
-        /// API version to use for explanation
-        #[arg(long)]
-        api_version: Option<String>,
     },
 
     /// Drain a node (set to drain availability)
@@ -529,10 +501,6 @@ pub(crate) enum Commands {
         /// Timeout in seconds
         #[arg(short, long, default_value = "60")]
         timeout: u64,
-
-        /// JSONPath expression to wait for
-        #[arg(long)]
-        jsonpath: Option<String>,
     },
 
     /// Manage configs
@@ -1230,14 +1198,13 @@ impl Cli {
                 || cli.tlscacert.is_some()
                 || cli.tlscert.is_some()
                 || cli.tlskey.is_some()
-                || cli.skip_tls_verify
             {
                 let conn_config = crate::api::client::ConnectionConfig {
                     host: cli.host.clone(),
                     tlscacert: cli.tlscacert.clone(),
                     tlscert: cli.tlscert.clone(),
                     tlskey: cli.tlskey.clone(),
-                    skip_tls_verify: cli.skip_tls_verify,
+                    ..Default::default()
                 };
                 if let Some(ref ctx_name) = cli.context {
                     DockerClient::with_context(Some(ctx_name))
@@ -1370,11 +1337,7 @@ impl Cli {
                 api_resources::run().await?;
                 return Ok(());
             }
-            Commands::Explain {
-                resource,
-                recursive: _,
-                api_version: _,
-            } => {
+            Commands::Explain { resource } => {
                 explain::run(resource.map(|r| r.to_string())).await?;
                 return Ok(());
             }
@@ -1425,7 +1388,6 @@ impl Cli {
                 selector,
                 field_selector,
                 sort_by,
-                all_namespaces: _,
                 output: get_output,
             } => {
                 let output = get_output.unwrap_or(cli.output);
@@ -1457,15 +1419,15 @@ impl Cli {
                 filename,
                 stdin,
                 dry_run,
-                output: _,
+                output: create_output,
             } => {
-                create::run(client, resource, name, filename, stdin, dry_run).await?;
+                let output = create_output.unwrap_or(cli.output);
+                create::run(client, resource, name, filename, stdin, dry_run, output).await?;
             }
             Commands::Delete {
                 resource,
                 name,
                 selector,
-                force,
                 dry_run,
                 ignore_not_found,
                 grace_period,
@@ -1478,7 +1440,6 @@ impl Cli {
                     name,
                     delete::DeleteOptions {
                         selector,
-                        force,
                         dry_run,
                         ignore_not_found,
                         grace_period,
@@ -1564,9 +1525,10 @@ impl Cli {
                 filename,
                 stdin,
                 dry_run,
-                output: _,
+                output: apply_output,
             } => {
-                apply::run(client, resource, name, filename, stdin, dry_run).await?;
+                let output = apply_output.unwrap_or(cli.output);
+                apply::run(client, resource, name, filename, stdin, dry_run, output).await?;
             }
             Commands::Run {
                 name,
@@ -1574,10 +1536,15 @@ impl Cli {
                 replicas,
                 env,
                 labels,
-                network: _,
+                network,
                 publish,
+                output,
             } => {
-                run::run(client, name, image, replicas, env, labels, publish).await?;
+                let output = output.unwrap_or(cli.output);
+                run::run(
+                    client, name, image, replicas, env, labels, network, publish, output,
+                )
+                .await?;
             }
             Commands::Events {
                 filter_types,
@@ -1707,7 +1674,6 @@ impl Cli {
                 name,
                 condition,
                 timeout,
-                jsonpath: _,
             } => {
                 // Reject unsupported kinds up front rather than after connecting.
                 let resource_str = resource.to_string();
@@ -2248,12 +2214,120 @@ mod tests {
         assert!(Cli::try_parse_from(["swarmctl", "vault", "store"]).is_err());
     }
 
+    /// Regression guard: these flags used to parse and then be discarded, so a
+    /// script could pass `--namespace prod` (or `--all-endpoints`, `--jsonpath`,
+    /// `--all-resources`) and get no effect and no warning.
+    #[test]
+    fn removed_no_op_flags_are_rejected() {
+        for gone in ["--all-endpoints", "--namespace", "-n", "--skip-tls-verify"] {
+            assert!(
+                Cli::try_parse_from(["swarmctl", gone, "get", "nodes"]).is_err(),
+                "{gone} was a no-op and must not be accepted again"
+            );
+        }
+        for argv in [
+            vec!["swarmctl", "get", "nodes", "--all-namespaces"],
+            vec!["swarmctl", "get", "nodes", "-A"],
+            vec!["swarmctl", "wait", "services", "web", "--jsonpath", ".x"],
+            vec![
+                "swarmctl",
+                "label",
+                "services",
+                "web",
+                "app=x",
+                "--all-resources",
+            ],
+            vec!["swarmctl", "explain", "services", "--recursive"],
+            vec!["swarmctl", "delete", "services", "web", "--force"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "should reject no-op flag: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_and_apply_output_are_typed_formats() {
+        // These were `Option<String>` and never parsed, so any value was
+        // accepted and ignored.
+        for argv in [
+            vec![
+                "swarmctl",
+                "create",
+                "services",
+                "--filename",
+                "s.json",
+                "-o",
+                "json",
+            ],
+            vec![
+                "swarmctl",
+                "apply",
+                "services",
+                "--filename",
+                "s.json",
+                "-o",
+                "yaml",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_ok(), "should parse: {argv:?}");
+        }
+        assert!(
+            Cli::try_parse_from([
+                "swarmctl",
+                "create",
+                "services",
+                "--filename",
+                "s.json",
+                "-o",
+                "notaformat"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn run_publish_and_network_are_usable() {
+        for argv in [
+            vec![
+                "swarmctl",
+                "run",
+                "web",
+                "-i",
+                "nginx",
+                "--publish",
+                "8080:80",
+            ],
+            vec![
+                "swarmctl",
+                "run",
+                "web",
+                "-i",
+                "nginx",
+                "--publish",
+                "5353:53/udp",
+                "--network",
+                "frontend",
+                "--labels",
+                "app=web",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_ok(), "should parse: {argv:?}");
+        }
+    }
+
     #[test]
     fn fanout_flags_parse_and_depend_on_endpoints() {
         assert!(Cli::try_parse_from(["swarmctl", "--endpoints", "a,b", "get", "nodes"]).is_ok());
         assert!(Cli::try_parse_from(["swarmctl", "get", "nodes", "--endpoints", "a,b"]).is_ok());
-        // --all-endpoints is meaningless without --endpoints.
-        assert!(Cli::try_parse_from(["swarmctl", "--all-endpoints", "get", "nodes"]).is_err());
+        // The removed no-op flags must stay gone.
+        for gone in ["--all-endpoints", "--namespace", "--skip-tls-verify"] {
+            assert!(
+                Cli::try_parse_from(["swarmctl", gone, "get", "nodes"]).is_err(),
+                "{gone} was a no-op and should not have come back"
+            );
+        }
         assert!(Cli::try_parse_from(["swarmctl", "-y", "get", "nodes"]).is_ok());
     }
 

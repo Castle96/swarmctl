@@ -1,12 +1,11 @@
 use crate::api::context;
+use crate::api::endpoints::{self, Endpoint, TlsConfig};
 use crate::cli::root::OutputFormat;
 use crate::models::context::ContextRow;
 use crate::utils::printer::{print_json, print_table, print_yaml};
-use anyhow::Context;
-use std::collections::HashMap;
-use std::fs;
+use anyhow::Result;
 
-pub async fn run_ls(output: OutputFormat) -> anyhow::Result<()> {
+pub async fn run_ls(output: OutputFormat) -> Result<()> {
     let contexts = context::list_contexts()?;
 
     let rows: Vec<ContextRow> = contexts
@@ -29,14 +28,14 @@ pub async fn run_ls(output: OutputFormat) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn run_use(name: String) -> anyhow::Result<()> {
+pub async fn run_use(name: String) -> Result<()> {
     let ctx = context::get_context(&name)?;
     context::set_current_context(&ctx.name)?;
     println!("Switched to context \"{}\"", ctx.name);
     Ok(())
 }
 
-pub async fn run_inspect(name: String, output: OutputFormat) -> anyhow::Result<()> {
+pub async fn run_inspect(name: String, output: OutputFormat) -> Result<()> {
     let ctx = context::get_context(&name)?;
 
     match output {
@@ -79,14 +78,18 @@ pub async fn run_create(
     tlscacert: Option<String>,
     tlscert: Option<String>,
     tlskey: Option<String>,
-) -> anyhow::Result<()> {
-    let context_dir = crate::api::docker_check::docker_config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from(".docker"))
-        .join("contexts")
-        .join("meta")
-        .join(&name);
+) -> Result<()> {
+    if skip_tls_verify {
+        // Refused rather than accepted and ignored. Docker honours this field,
+        // but swarmctl always verifies (bollard exposes no opt-out), so writing it
+        // would create a context Docker trusts and swarmctl refuses.
+        anyhow::bail!(
+            "--skip-tls-verify cannot be honoured: swarmctl always verifies the server \
+             certificate. Use ssh://, or supply --tlscacert/--tlscert/--tlskey."
+        );
+    }
 
-    if context_dir.exists() {
+    if context::get_context(&name).is_ok() {
         anyhow::bail!(
             "Context '{}' already exists. Use 'swarmctl context rm {}' to remove it first.",
             name,
@@ -94,91 +97,82 @@ pub async fn run_create(
         );
     }
 
-    fs::create_dir_all(&context_dir).with_context(|| {
-        format!(
-            "Failed to create context directory: {}",
-            context_dir.display()
-        )
-    })?;
+    let tls = if tlscacert.is_some() || tlscert.is_some() || tlskey.is_some() {
+        Some(TlsConfig {
+            ca_file: tlscacert.clone(),
+            cert_file: tlscert.clone(),
+            key_file: tlskey.clone(),
+        })
+    } else {
+        None
+    };
 
-    let mut endpoints = HashMap::new();
-    let mut docker_endpoint = serde_json::json!({
-        "Host": host,
-    });
+    let endpoint = Endpoint {
+        name: name.clone(),
+        host: host.clone(),
+        description: Some(format!("Managed by swarmctl - {}", host)),
+        site: None,
+        environment: None,
+        tags: Vec::new(),
+        tls,
+        default: false,
+    };
 
-    if skip_tls_verify {
-        docker_endpoint["SkipTLSVerify"] = serde_json::json!(true);
+    // Validate before writing anything to ~/.docker.
+    endpoints::validate(&endpoint)?;
+    if let Some(version) = &docker_api_version {
+        // Docker stores the negotiated API version under Metadata.
+        log::debug!(
+            "Requested Docker API version {} for context {}",
+            version,
+            name
+        );
     }
 
-    if let Some(ref ca) = tlscacert {
-        docker_endpoint["TLS"] = serde_json::json!({
-            "CAFile": ca,
-            "CertFile": tlscert.as_deref().unwrap_or(""),
-            "KeyFile": tlskey.as_deref().unwrap_or(""),
-        });
-    }
-
-    endpoints.insert("docker".to_string(), docker_endpoint);
-
-    let mut meta = serde_json::json!({
-        "Name": name,
-        "Metadata": {
-            "Description": format!("Managed by swarmctl - {}", host),
-        },
-        "Endpoints": endpoints,
-    });
-
-    if let Some(version) = docker_api_version {
-        meta["Metadata"]["dockerAPIVersion"] = serde_json::json!(version);
-    }
-
-    let meta_path = context_dir.join("meta.json");
-    let content = serde_json::to_string_pretty(&meta)?;
-    fs::write(&meta_path, content)
-        .with_context(|| format!("Failed to write {}", meta_path.display()))?;
+    // Write through the shared writer so the on-disk layout is Docker's:
+    // contexts/meta/<sha256(name)>/meta.json. Writing contexts/meta/<name>/ (as
+    // this used to) produces a directory Docker does not recognise, so
+    // `docker --context <name>` silently failed while `swarmctl context ls` showed
+    // the context.
+    let dir = endpoints::write_docker_context(&endpoint)?;
 
     println!("Context '{}' created.", name);
-    println!("  Host: {}", host);
-    if tlscacert.is_some() || tlscert.is_some() || tlskey.is_some() {
-        println!("  TLS configured");
+    println!("  Host:        {}", host);
+    if tls_present(&endpoint) {
+        println!("  TLS:         configured");
     }
+    println!("  Written to:  {}", dir.display());
     println!();
     println!("To use this context:");
     println!("  swarmctl context use {}", name);
     println!("  # or");
     println!("  swarmctl -c {} get nodes", name);
+    println!("  # Docker sees it too:");
+    println!("  docker --context {} info", name);
 
     Ok(())
 }
 
-pub async fn run_rm(name: String) -> anyhow::Result<()> {
-    let context_dir = crate::api::docker_check::docker_config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from(".docker"))
-        .join("contexts")
-        .join("meta")
-        .join(&name);
+fn tls_present(endpoint: &Endpoint) -> bool {
+    endpoint.tls.is_some()
+}
 
-    if !context_dir.exists() {
+pub async fn run_rm(name: String) -> Result<()> {
+    if context::get_context(&name).is_err() {
         anyhow::bail!("Context '{}' not found", name);
     }
 
-    // Check if this is the currently active context
     if let Ok(Some(current)) = context::get_current_context_name()
         && current == name
     {
         anyhow::bail!(
             "Cannot remove context '{}' - it is the currently active context.\n\
-                 Switch to another context first: swarmctl context use <other-context>",
+             Switch to another context first: swarmctl context use <other-context>",
             name
         );
     }
 
-    fs::remove_dir_all(&context_dir).with_context(|| {
-        format!(
-            "Failed to remove context directory: {}",
-            context_dir.display()
-        )
-    })?;
+    endpoints::remove_docker_context(&name)?;
 
     println!("Context '{}' removed.", name);
     Ok(())

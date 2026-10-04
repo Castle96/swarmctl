@@ -195,12 +195,12 @@ pub fn reject_unsafe(command: &Commands) -> Result<()> {
 /// True when `cli` was invoked in a way that asks for fan-out.
 pub fn requested(cli: &Cli) -> Option<Result<Selection>> {
     match &cli.endpoints {
-        Some(list) if !list.is_empty() => Some(resolve_selection(list, cli.all_endpoints)),
+        Some(list) if !list.is_empty() => Some(resolve_selection(list)),
         _ => None,
     }
 }
 
-fn resolve_selection(list: &str, all: bool) -> Result<Selection> {
+fn resolve_selection(list: &str) -> Result<Selection> {
     let registry = Registry::load()?;
     let names: Vec<String> = list
         .split(',')
@@ -217,13 +217,10 @@ fn resolve_selection(list: &str, all: bool) -> Result<Selection> {
         if selected.is_empty() {
             anyhow::bail!("No endpoints are registered.");
         }
-        let _ = all;
         return Ok(Selection::Explicit(selected));
     }
 
-    let explicit = registry.select(&names)?;
-    let _ = all;
-    Ok(Selection::Explicit(explicit))
+    Ok(Selection::Explicit(registry.select(&names)?))
 }
 
 #[cfg(test)]
@@ -323,13 +320,13 @@ mod tests {
 
     #[test]
     fn unknown_endpoint_name_is_an_actionable_error() {
-        let err = resolve_selection("nope", false).unwrap_err().to_string();
+        let err = resolve_selection("nope").unwrap_err().to_string();
         assert!(err.contains("Unknown endpoint"), "got: {err}");
     }
 
     #[test]
     fn blank_endpoint_list_is_rejected() {
-        let err = resolve_selection(" , ,", false).unwrap_err().to_string();
+        let err = resolve_selection(" , ,").unwrap_err().to_string();
         assert!(err.contains("no endpoint names"), "got: {err}");
     }
 
