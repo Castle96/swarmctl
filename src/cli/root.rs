@@ -1540,9 +1540,18 @@ impl Cli {
                 publish,
                 output,
             } => {
-                let output = output.unwrap_or(cli.output);
                 run::run(
-                    client, name, image, replicas, env, labels, network, publish, output,
+                    client,
+                    run::RunOptions {
+                        name,
+                        image,
+                        replicas,
+                        env,
+                        labels,
+                        network,
+                        publish,
+                        output: output.unwrap_or(cli.output),
+                    },
                 )
                 .await?;
             }

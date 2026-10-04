@@ -125,15 +125,17 @@ pub async fn run(
     match resource {
         ResourceType::Services => {
             delete_service(
-                client,
-                resource,
+                ServiceDelete {
+                    client,
+                    resource,
+                    dry_run,
+                    ignore_not_found,
+                    grace_period,
+                    wait_for_delete,
+                    timeout,
+                },
                 name,
                 selector,
-                dry_run,
-                ignore_not_found,
-                grace_period,
-                wait_for_delete,
-                timeout,
             )
             .await?
         }
@@ -231,17 +233,31 @@ async fn apply_grace_period(client: &DockerClient, name: &str, grace: i64) -> an
     Ok(())
 }
 
-async fn delete_service(
-    client: &DockerClient,
+/// Options for the service delete path.
+struct ServiceDelete<'a> {
+    client: &'a DockerClient,
     resource: ResourceType,
-    name: Option<String>,
-    selector: Option<String>,
     dry_run: bool,
     ignore_not_found: bool,
     grace_period: Option<i64>,
     wait_for_delete: bool,
     timeout: Option<u64>,
+}
+
+async fn delete_service(
+    opts: ServiceDelete<'_>,
+    name: Option<String>,
+    selector: Option<String>,
 ) -> anyhow::Result<()> {
+    let ServiceDelete {
+        client,
+        resource,
+        dry_run,
+        ignore_not_found,
+        grace_period,
+        wait_for_delete,
+        timeout,
+    } = opts;
     if let Some(name) = name {
         if dry_run {
             println!("[dry run] Would delete service '{}'", name);

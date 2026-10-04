@@ -6,17 +6,29 @@ use bollard::models::{
 };
 use std::collections::HashMap;
 
-pub async fn run(
-    client: &DockerClient,
-    name: String,
-    image: String,
-    replicas: u64,
-    env: Vec<String>,
-    labels: Vec<String>,
-    network: Option<String>,
-    publish: Vec<String>,
-    output: crate::cli::root::OutputFormat,
-) -> anyhow::Result<()> {
+/// Everything `swarmctl run` accepts, as one value.
+pub struct RunOptions {
+    pub name: String,
+    pub image: String,
+    pub replicas: u64,
+    pub env: Vec<String>,
+    pub labels: Vec<String>,
+    pub network: Option<String>,
+    pub publish: Vec<String>,
+    pub output: crate::cli::root::OutputFormat,
+}
+
+pub async fn run(client: &DockerClient, opts: RunOptions) -> anyhow::Result<()> {
+    let RunOptions {
+        name,
+        image,
+        replicas,
+        env,
+        labels,
+        network,
+        publish,
+        output,
+    } = opts;
     let mut label_map: HashMap<String, String> = HashMap::new();
     for l in &labels {
         match l.split_once('=') {
