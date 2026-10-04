@@ -205,7 +205,7 @@ Accepted before or after the subcommand.
 | `get` | `--show-labels` | Print labels after each row |
 | `delete` | `--dry-run` | Report what would be deleted |
 | `delete` | `--selector` | Delete everything matching a label |
-| `delete` | `--ignore-not-found` | Exit 0 when already absent |
+| `delete` | `--ignore-not-found` | Exit 0 when already absent. Does not apply to `delete tasks`, which is unsupported outright. |
 | `delete` | `--grace-period` | Container shutdown grace period, applied to the service before removal |
 | `delete` | `--wait`, `--timeout` | Block until the resource is really gone (default bound 60s) |
 | `logs` | `--follow` | Stream |
@@ -263,6 +263,17 @@ outright.
   equivalent — new tasks stop being scheduled while running tasks finish. The
   output says `drained`, not `deleted`. Use the Docker CLI if the node itself
   must be removed.
+
+### Ports
+
+`swarmctl ports` reports the same rows in every output format — the table and
+`-o json` used to come from different listings, so they disagreed on both row
+count and field names for the same cluster. `--protocol` applies to all formats,
+and `--available` recomputes against the same filtered set so the free ports
+cannot contradict the table above them.
+
+`--range-start` greater than `--range-end` is rejected before any API call;
+previously it produced an empty range and a cheerful "No available ports".
 
 ### Resource types
 

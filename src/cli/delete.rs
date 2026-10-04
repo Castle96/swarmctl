@@ -172,7 +172,7 @@ pub async fn run(
             )
             .await?
         }
-        ResourceType::Tasks => delete_task(name, ignore_not_found).await?,
+        ResourceType::Tasks => delete_task(name, ignore_not_found)?,
         ResourceType::Nodes => {
             delete_node(client, name, selector, dry_run, ignore_not_found).await?
         }
@@ -495,20 +495,26 @@ async fn delete_config(
     Ok(())
 }
 
-async fn delete_task(name: Option<String>, ignore_not_found: bool) -> anyhow::Result<()> {
-    if let Some(_task_id) = name {
+/// Task deletion.
+///
+/// Swarm tasks are owned by their service and cannot be deleted directly; you
+/// remove one by scaling the service or removing it. `--ignore-not-found`
+/// previously short-circuited this to `Ok(())`, so `delete tasks abc
+/// --ignore-not-found` exited 0 having done nothing at all — including for a
+/// task that does not exist.
+fn delete_task(name: Option<String>, ignore_not_found: bool) -> anyhow::Result<()> {
+    let _ = name;
+    Err(anyhow::anyhow!(
+        "Deleting a task is not supported: tasks are managed through their service. \
+         Use `swarmctl scale <service> 0` to stop a task's service, or \
+         `swarmctl delete services <service>` to remove it.{}",
         if ignore_not_found {
-            return Ok(());
+            " (--ignore-not-found does not apply: this is an unsupported operation, \
+             not a missing resource.)"
+        } else {
+            ""
         }
-        Err(anyhow::anyhow!(
-            "Task deletion is not supported. Tasks are managed through services."
-        ))
-    } else {
-        if ignore_not_found {
-            return Ok(());
-        }
-        Err(anyhow::anyhow!("Must specify task ID"))
-    }
+    ))
 }
 /// Drain a node.
 ///

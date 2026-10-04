@@ -1,5 +1,5 @@
 use crate::api::client::DockerClient;
-use crate::api::port::{get_available_ports, list_service_ports, list_used_ports};
+use crate::api::port::{get_available_ports, list_service_ports};
 use crate::cli::root::OutputFormat;
 use crate::models::port::ServicePortInfo;
 use crate::utils::printer::{print_json, print_yaml};
@@ -13,43 +13,81 @@ pub async fn run(
     range_end: Option<u16>,
     protocol: Option<String>,
 ) -> Result<()> {
+    // Validate arguments before contacting the daemon, so a typo is reported
+    // immediately rather than after an API round trip.
+    let (start, end) = resolve_range(range_start, range_end)?;
+
+    // One source of truth for every output format. `-o json` previously used a
+    // different, de-duplicated listing and ignored --protocol and --available, so
+    // `ports` and `ports -o json` disagreed about both row count and field names
+    // for the same cluster.
+    let ports = list_service_ports(client.inner()).await?;
+    let filtered = filter_by_protocol(ports, protocol.as_deref());
+
+    let available = if show_available {
+        Some(
+            get_available_ports(client.inner(), start, end, protocol.as_deref())
+                .await
+                .map(|_daemon_view| {
+                    // Recompute against the same filtered set so the reported
+                    // free ports cannot contradict the table above them.
+                    let used: std::collections::HashSet<u16> = filtered
+                        .iter()
+                        .filter_map(|p| p.published_port.parse::<u16>().ok())
+                        .collect();
+                    (start..=end)
+                        .filter(|p| !used.contains(p))
+                        .collect::<Vec<u16>>()
+                })?,
+        )
+    } else {
+        None
+    };
+
     match output {
-        OutputFormat::Table => {
-            let ports = list_service_ports(client.inner()).await?;
-
-            let filtered: Vec<ServicePortInfo> = if let Some(ref proto) = protocol {
-                ports
-                    .into_iter()
-                    .filter(|p| p.protocol.to_lowercase() == proto.to_lowercase())
-                    .collect()
-            } else {
-                ports
-            };
-
+        OutputFormat::Json => print_json(&filtered)?,
+        OutputFormat::Yaml => print_yaml(&filtered)?,
+        OutputFormat::Name => {
+            for p in &filtered {
+                println!("service/{}/{}", p.service_name, p.published_port);
+            }
+        }
+        _ => {
             print_ports_table(&filtered);
-
-            if show_available {
-                let start = range_start.unwrap_or(30000);
-                let end = range_end.unwrap_or(40000);
-                let available =
-                    get_available_ports(client.inner(), start, end, protocol.as_deref()).await?;
+            if let Some(available) = available {
                 print_available_ports(&available, start, end);
             }
         }
-        OutputFormat::Json => {
-            let ports = list_used_ports(client.inner()).await?;
-            print_json(&ports)?;
-        }
-        OutputFormat::Yaml => {
-            let ports = list_used_ports(client.inner()).await?;
-            print_yaml(&ports)?;
-        }
-        OutputFormat::Wide | OutputFormat::Name => {
-            let ports = list_service_ports(client.inner()).await?;
-            print_ports_table(&ports);
-        }
     }
     Ok(())
+}
+
+/// Resolve and validate the port range to scan.
+fn resolve_range(start: Option<u16>, end: Option<u16>) -> Result<(u16, u16)> {
+    const DEFAULT_START: u16 = 30000;
+    const DEFAULT_END: u16 = 40000;
+    match (start, end) {
+        (Some(s), Some(e)) if s > e => anyhow::bail!(
+            "--range-start ({}) must not be greater than --range-end ({})",
+            s,
+            e
+        ),
+        (s, e) => Ok((s.unwrap_or(DEFAULT_START), e.unwrap_or(DEFAULT_END))),
+    }
+}
+
+/// Keep only ports matching `protocol`, case-insensitively.
+fn filter_by_protocol(ports: Vec<ServicePortInfo>, protocol: Option<&str>) -> Vec<ServicePortInfo> {
+    match protocol {
+        Some(want) => {
+            let want = want.to_lowercase();
+            ports
+                .into_iter()
+                .filter(|p| p.protocol.to_lowercase() == want)
+                .collect()
+        }
+        None => ports,
+    }
 }
 
 fn print_ports_table(ports: &[ServicePortInfo]) {
@@ -383,4 +421,67 @@ pub async fn run_tui(client: &DockerClient) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_an_inverted_range() {
+        // Previously `(start..=end)` with start > end silently yielded nothing and
+        // printed "No available ports" with exit 0.
+        let result = resolve_range(Some(40000), Some(30000));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be greater")
+        );
+    }
+
+    #[test]
+    fn range_defaults_and_passthrough() {
+        assert_eq!(resolve_range(None, None).unwrap(), (30000, 40000));
+        assert_eq!(resolve_range(Some(8000), None).unwrap(), (8000, 40000));
+        assert_eq!(resolve_range(None, Some(9000)).unwrap(), (30000, 9000));
+        assert_eq!(resolve_range(Some(1), Some(2)).unwrap(), (1, 2));
+        // An empty range is odd but not an error.
+        assert_eq!(resolve_range(Some(5), Some(5)).unwrap(), (5, 5));
+    }
+
+    #[test]
+    fn protocol_filter_is_case_insensitive() {
+        let ports = vec![
+            ServicePortInfo {
+                service_name: "a".into(),
+                published_port: "80".into(),
+                target_port: "80".into(),
+                protocol: "TCP".into(),
+                publish_mode: "ingress".into(),
+            },
+            ServicePortInfo {
+                service_name: "b".into(),
+                published_port: "53".into(),
+                target_port: "53".into(),
+                protocol: "UDP".into(),
+                publish_mode: "ingress".into(),
+            },
+        ];
+        let filtered = filter_by_protocol(ports.clone(), Some("udp"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].service_name, "b");
+
+        let all = vec![ServicePortInfo {
+            service_name: "a".into(),
+            published_port: "80".into(),
+            target_port: "80".into(),
+            protocol: "TCP".into(),
+            publish_mode: "ingress".into(),
+        }];
+        assert_eq!(filter_by_protocol(ports.clone(), None).len(), 2);
+        assert_eq!(filter_by_protocol(all, Some("TCP")).len(), 1);
+        assert!(filter_by_protocol(Vec::new(), Some("tcp")).is_empty());
+    }
 }
