@@ -89,9 +89,10 @@ pub async fn run_env(
     };
 
     if let Some(ref mut task_template) = spec.task_template
-        && let Some(ref mut container_spec) = task_template.container_spec {
-            container_spec.env = Some(new_vars);
-        }
+        && let Some(ref mut container_spec) = task_template.container_spec
+    {
+        container_spec.env = Some(new_vars);
+    }
 
     let opts = bollard::query_parameters::UpdateServiceOptionsBuilder::default()
         .version(version)

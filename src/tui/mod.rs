@@ -161,9 +161,7 @@ impl App {
             "pending" | "waiting" | "starting" | "new" | "assigned" | "accepted" => {
                 ("○".into(), COLOR_WARNING)
             }
-            "failed" | "error" | "down" | "orphaned" | "remove" => {
-                ("●".into(), COLOR_ERROR)
-            }
+            "failed" | "error" | "down" | "orphaned" | "remove" => ("●".into(), COLOR_ERROR),
             "paused" | "drain" | "draining" | "halted" => ("⏸".into(), COLOR_DIM),
             "complete" | "shutdown" => ("✓".into(), COLOR_DIM),
             _ => ("●".into(), COLOR_DIM),
@@ -178,7 +176,11 @@ impl App {
                 } else {
                     self.services
                         .iter()
-                        .filter(|s| s.name.to_lowercase().contains(&self.search_query.to_lowercase()))
+                        .filter(|s| {
+                            s.name
+                                .to_lowercase()
+                                .contains(&self.search_query.to_lowercase())
+                        })
                         .count()
                 }
             }
@@ -188,7 +190,11 @@ impl App {
                 } else {
                     self.nodes
                         .iter()
-                        .filter(|n| n.hostname.to_lowercase().contains(&self.search_query.to_lowercase()))
+                        .filter(|n| {
+                            n.hostname
+                                .to_lowercase()
+                                .contains(&self.search_query.to_lowercase())
+                        })
                         .count()
                 }
             }
@@ -198,7 +204,11 @@ impl App {
                 } else {
                     self.networks
                         .iter()
-                        .filter(|n| n.name.to_lowercase().contains(&self.search_query.to_lowercase()))
+                        .filter(|n| {
+                            n.name
+                                .to_lowercase()
+                                .contains(&self.search_query.to_lowercase())
+                        })
                         .count()
                 }
             }
@@ -208,7 +218,11 @@ impl App {
                 } else {
                     self.secrets
                         .iter()
-                        .filter(|s| s.name.to_lowercase().contains(&self.search_query.to_lowercase()))
+                        .filter(|s| {
+                            s.name
+                                .to_lowercase()
+                                .contains(&self.search_query.to_lowercase())
+                        })
                         .count()
                 }
             }
@@ -218,7 +232,11 @@ impl App {
                 } else {
                     self.tasks
                         .iter()
-                        .filter(|t| t.name.to_lowercase().contains(&self.search_query.to_lowercase()))
+                        .filter(|t| {
+                            t.name
+                                .to_lowercase()
+                                .contains(&self.search_query.to_lowercase())
+                        })
                         .count()
                 }
             }
@@ -590,146 +608,148 @@ async fn run_app<B: ratatui::backend::Backend>(
     loop {
         let now = Instant::now();
 
-        if app.auto_refresh && now.duration_since(app.last_refresh) >= Duration::from_secs(app.auto_refresh_interval) {
+        if app.auto_refresh
+            && now.duration_since(app.last_refresh)
+                >= Duration::from_secs(app.auto_refresh_interval)
+        {
             app.refresh(client).await?;
         }
 
         terminal.draw(|f| ui(f, app))?;
 
-        if event::poll(poll_interval)? {
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                if app.search_mode {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.search_mode = false;
-                            app.search_query.clear();
-                        }
-                        KeyCode::Enter => {
-                            app.search_mode = false;
-                        }
-                        KeyCode::Backspace => {
-                            app.search_query.pop();
-                            app.selected_index = 0;
-                        }
-                        KeyCode::Char(c) => {
-                            app.search_query.push(c);
-                            app.selected_index = 0;
-                        }
-                        _ => {}
+        if event::poll(poll_interval)?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            if app.search_mode {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.search_mode = false;
+                        app.search_query.clear();
                     }
-                } else {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            if app.detail_open {
-                                app.detail_open = false;
-                            } else {
-                                return Ok(());
-                            }
-                        }
-                        KeyCode::Char('r') => {
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('/') => {
-                            app.search_mode = true;
-                            app.search_query.clear();
-                        }
-                        KeyCode::Char('a') => {
-                            app.auto_refresh = !app.auto_refresh;
-                        }
-                        KeyCode::Char('+') | KeyCode::Char('=') => {
-                            app.auto_refresh_interval = match app.auto_refresh_interval {
-                                2 => 5,
-                                5 => 10,
-                                10 => 30,
-                                30 => 60,
-                                _ => 60,
-                            };
-                        }
-                        KeyCode::Char('-') => {
-                            app.auto_refresh_interval = match app.auto_refresh_interval {
-                                60 => 30,
-                                30 => 10,
-                                10 => 5,
-                                5 => 2,
-                                _ => 2,
-                            };
-                        }
-                        KeyCode::Char('d') | KeyCode::Enter => {
-                            app.detail_open = !app.detail_open;
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            let total = app.filtered_item_count();
-                            if total > 0 {
-                                app.selected_index = (app.selected_index + 1).min(total - 1);
-                            }
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            app.selected_index = app.selected_index.saturating_sub(1);
-                        }
-                        KeyCode::Tab => {
-                            app.state = app.state.next();
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::BackTab => {
-                            app.state = app.state.prev();
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('1') => {
-                            app.state = AppState::Services;
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('2') => {
-                            app.state = AppState::Nodes;
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('3') => {
-                            app.state = AppState::Networks;
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('4') => {
-                            app.state = AppState::Ports;
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('5') => {
-                            app.state = AppState::Secrets;
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('6') => {
-                            app.state = AppState::Tasks;
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('7') => {
-                            app.state = AppState::Events;
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        KeyCode::Char('8') => {
-                            app.state = AppState::Logs;
-                            app.selected_index = 0;
-                            app.detail_open = false;
-                            app.refresh(client).await?;
-                        }
-                        _ => {}
+                    KeyCode::Enter => {
+                        app.search_mode = false;
                     }
+                    KeyCode::Backspace => {
+                        app.search_query.pop();
+                        app.selected_index = 0;
+                    }
+                    KeyCode::Char(c) => {
+                        app.search_query.push(c);
+                        app.selected_index = 0;
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        if app.detail_open {
+                            app.detail_open = false;
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('/') => {
+                        app.search_mode = true;
+                        app.search_query.clear();
+                    }
+                    KeyCode::Char('a') => {
+                        app.auto_refresh = !app.auto_refresh;
+                    }
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        app.auto_refresh_interval = match app.auto_refresh_interval {
+                            2 => 5,
+                            5 => 10,
+                            10 => 30,
+                            30 => 60,
+                            _ => 60,
+                        };
+                    }
+                    KeyCode::Char('-') => {
+                        app.auto_refresh_interval = match app.auto_refresh_interval {
+                            60 => 30,
+                            30 => 10,
+                            10 => 5,
+                            5 => 2,
+                            _ => 2,
+                        };
+                    }
+                    KeyCode::Char('d') | KeyCode::Enter => {
+                        app.detail_open = !app.detail_open;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let total = app.filtered_item_count();
+                        if total > 0 {
+                            app.selected_index = (app.selected_index + 1).min(total - 1);
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        app.selected_index = app.selected_index.saturating_sub(1);
+                    }
+                    KeyCode::Tab => {
+                        app.state = app.state.next();
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::BackTab => {
+                        app.state = app.state.prev();
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('1') => {
+                        app.state = AppState::Services;
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('2') => {
+                        app.state = AppState::Nodes;
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('3') => {
+                        app.state = AppState::Networks;
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('4') => {
+                        app.state = AppState::Ports;
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('5') => {
+                        app.state = AppState::Secrets;
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('6') => {
+                        app.state = AppState::Tasks;
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('7') => {
+                        app.state = AppState::Events;
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    KeyCode::Char('8') => {
+                        app.state = AppState::Logs;
+                        app.selected_index = 0;
+                        app.detail_open = false;
+                        app.refresh(client).await?;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -744,7 +764,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // header
             Constraint::Length(1), // tabs
-            Constraint::Min(0),   // content
+            Constraint::Min(0),    // content
             Constraint::Length(1), // footer
         ])
         .split(size);
@@ -779,11 +799,15 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Span::styled("  │  ", Style::default().fg(COLOR_DIM)),
         Span::styled(&app.host_info, Style::default().fg(Color::White)),
         Span::styled("  │  ", Style::default().fg(COLOR_DIM)),
-        Span::styled(auto_status, Style::default().fg(if app.auto_refresh { COLOR_SUCCESS } else { COLOR_DIM })),
         Span::styled(
-            "  │  ",
-            Style::default().fg(COLOR_DIM),
+            auto_status,
+            Style::default().fg(if app.auto_refresh {
+                COLOR_SUCCESS
+            } else {
+                COLOR_DIM
+            }),
         ),
+        Span::styled("  │  ", Style::default().fg(COLOR_DIM)),
         Span::styled(
             app.state.label().to_string(),
             Style::default()
@@ -796,11 +820,8 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ),
     ]);
 
-    let header = Paragraph::new(header_text).style(
-        Style::default()
-            .bg(COLOR_HEADER_BG)
-            .fg(Color::White),
-    );
+    let header =
+        Paragraph::new(header_text).style(Style::default().bg(COLOR_HEADER_BG).fg(Color::White));
     f.render_widget(header, area);
 }
 
@@ -867,11 +888,13 @@ fn render_main_list(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 fn make_header_row<'a>(cols: &[&'a str]) -> Row<'a> {
-    Row::new(cols.iter().map(|c| Cell::from(*c).style(
-        Style::default()
-            .fg(COLOR_PRIMARY)
-            .add_modifier(Modifier::BOLD),
-    )))
+    Row::new(cols.iter().map(|c| {
+        Cell::from(*c).style(
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )
+    }))
 }
 
 fn selected_style(is_selected: bool) -> Style {
@@ -890,7 +913,11 @@ fn render_services_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
     } else {
         app.services
             .iter()
-            .filter(|s| s.name.to_lowercase().contains(&app.search_query.to_lowercase()))
+            .filter(|s| {
+                s.name
+                    .to_lowercase()
+                    .contains(&app.search_query.to_lowercase())
+            })
             .collect()
     };
 
@@ -909,10 +936,7 @@ fn render_services_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Cell::from(Span::styled(&s.name, style)),
                 Cell::from(Span::styled(&s.mode, style)),
                 Cell::from(Span::styled(&s.replicas, style)),
-                Cell::from(Span::styled(
-                    truncate(&s.image, 40),
-                    style.fg(COLOR_DIM),
-                )),
+                Cell::from(Span::styled(truncate(&s.image, 40), style.fg(COLOR_DIM))),
             ])
         })
         .collect();
@@ -932,11 +956,12 @@ fn render_services_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
-            .title(format!(
-                " Services ({}) ",
-                app.filtered_item_count()
-            ))
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title(format!(" Services ({}) ", app.filtered_item_count()))
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     )
     .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
@@ -949,7 +974,11 @@ fn render_nodes_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
     } else {
         app.nodes
             .iter()
-            .filter(|n| n.hostname.to_lowercase().contains(&app.search_query.to_lowercase()))
+            .filter(|n| {
+                n.hostname
+                    .to_lowercase()
+                    .contains(&app.search_query.to_lowercase())
+            })
             .collect()
     };
 
@@ -973,10 +1002,7 @@ fn render_nodes_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Cell::from(Span::styled(icon, Style::default().fg(color))),
                 Cell::from(Span::styled(&n.hostname, style)),
                 Cell::from(Span::styled(&n.status, style.fg(color))),
-                Cell::from(Span::styled(
-                    &n.availability,
-                    style.fg(avail_color),
-                )),
+                Cell::from(Span::styled(&n.availability, style.fg(avail_color))),
                 Cell::from(Span::styled(&n.manager, style.fg(COLOR_DIM))),
             ])
         })
@@ -997,11 +1023,12 @@ fn render_nodes_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
-            .title(format!(
-                " Nodes ({}) ",
-                app.filtered_item_count()
-            ))
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title(format!(" Nodes ({}) ", app.filtered_item_count()))
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(table, area);
@@ -1013,7 +1040,11 @@ fn render_networks_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
     } else {
         app.networks
             .iter()
-            .filter(|n| n.name.to_lowercase().contains(&app.search_query.to_lowercase()))
+            .filter(|n| {
+                n.name
+                    .to_lowercase()
+                    .contains(&app.search_query.to_lowercase())
+            })
             .collect()
     };
 
@@ -1051,11 +1082,12 @@ fn render_networks_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
-            .title(format!(
-                " Networks ({}) ",
-                app.filtered_item_count()
-            ))
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title(format!(" Networks ({}) ", app.filtered_item_count()))
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(table, area);
@@ -1067,7 +1099,11 @@ fn render_ports_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
     } else {
         app.ports
             .iter()
-            .filter(|p| p.service_name.to_lowercase().contains(&app.search_query.to_lowercase()))
+            .filter(|p| {
+                p.service_name
+                    .to_lowercase()
+                    .contains(&app.search_query.to_lowercase())
+            })
             .collect()
     };
 
@@ -1087,7 +1123,11 @@ fn render_ports_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Cell::from(Span::styled(&p.target_port, style)),
                 Cell::from(Span::styled(
                     &p.protocol,
-                    style.fg(if p.protocol == "tcp" { COLOR_SUCCESS } else { COLOR_WARNING }),
+                    style.fg(if p.protocol == "tcp" {
+                        COLOR_SUCCESS
+                    } else {
+                        COLOR_WARNING
+                    }),
                 )),
             ])
         })
@@ -1108,11 +1148,12 @@ fn render_ports_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
-            .title(format!(
-                " Ports ({}) ",
-                app.filtered_item_count()
-            ))
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title(format!(" Ports ({}) ", app.filtered_item_count()))
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(table, area);
@@ -1124,7 +1165,11 @@ fn render_secrets_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
     } else {
         app.secrets
             .iter()
-            .filter(|s| s.name.to_lowercase().contains(&app.search_query.to_lowercase()))
+            .filter(|s| {
+                s.name
+                    .to_lowercase()
+                    .contains(&app.search_query.to_lowercase())
+            })
             .collect()
     };
 
@@ -1158,11 +1203,12 @@ fn render_secrets_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
-            .title(format!(
-                " Secrets ({}) ",
-                app.filtered_item_count()
-            ))
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title(format!(" Secrets ({}) ", app.filtered_item_count()))
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(table, area);
@@ -1174,7 +1220,11 @@ fn render_tasks_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
     } else {
         app.tasks
             .iter()
-            .filter(|t| t.name.to_lowercase().contains(&app.search_query.to_lowercase()))
+            .filter(|t| {
+                t.name
+                    .to_lowercase()
+                    .contains(&app.search_query.to_lowercase())
+            })
             .collect()
     };
 
@@ -1192,14 +1242,8 @@ fn render_tasks_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Cell::from(Span::styled(icon, Style::default().fg(color))),
                 Cell::from(Span::styled(&t.name, style)),
                 Cell::from(Span::styled(&t.current_state, style.fg(color))),
-                Cell::from(Span::styled(
-                    truncate(&t.node, 16),
-                    style.fg(COLOR_DIM),
-                )),
-                Cell::from(Span::styled(
-                    truncate(&t.image, 30),
-                    style.fg(COLOR_DIM),
-                )),
+                Cell::from(Span::styled(truncate(&t.node, 16), style.fg(COLOR_DIM))),
+                Cell::from(Span::styled(truncate(&t.image, 30), style.fg(COLOR_DIM))),
             ])
         })
         .collect();
@@ -1219,11 +1263,12 @@ fn render_tasks_table(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
-            .title(format!(
-                " Tasks ({}) ",
-                app.filtered_item_count()
-            ))
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title(format!(" Tasks ({}) ", app.filtered_item_count()))
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(table, area);
@@ -1236,8 +1281,12 @@ fn render_events_list(f: &mut ratatui::Frame, app: &App, area: Rect) {
         app.events
             .iter()
             .filter(|e| {
-                e.action.to_lowercase().contains(&app.search_query.to_lowercase())
-                    || e.id.to_lowercase().contains(&app.search_query.to_lowercase())
+                e.action
+                    .to_lowercase()
+                    .contains(&app.search_query.to_lowercase())
+                    || e.id
+                        .to_lowercase()
+                        .contains(&app.search_query.to_lowercase())
             })
             .collect()
     };
@@ -1268,11 +1317,12 @@ fn render_events_list(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
-            .title(format!(
-                " Events ({}) ",
-                app.filtered_item_count()
-            ))
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title(format!(" Events ({}) ", app.filtered_item_count()))
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(list, area);
@@ -1316,7 +1366,11 @@ fn render_logs(f: &mut ratatui::Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
             .title(" Services ")
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(services_list, chunks[0]);
@@ -1353,7 +1407,11 @@ fn render_logs(f: &mut ratatui::Frame, app: &App, area: Rect) {
                     .map(|(n, _)| n.as_str())
                     .unwrap_or("-")
             ))
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(log_list, chunks[1]);
@@ -1523,7 +1581,11 @@ fn render_detail_pane(f: &mut ratatui::Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_DIM))
             .title(" Details ")
-            .title_style(Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            .title_style(
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
 
     f.render_widget(detail, area);
@@ -1532,52 +1594,101 @@ fn render_detail_pane(f: &mut ratatui::Frame, app: &App, area: Rect) {
 fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let footer_text = if app.search_mode {
         Line::from(vec![
-            Span::styled(" /", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " /",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 format!("{}█", app.search_query),
                 Style::default().fg(Color::White),
             ),
-            Span::styled("  Esc to cancel  Enter to confirm", Style::default().fg(COLOR_DIM)),
+            Span::styled(
+                "  Esc to cancel  Enter to confirm",
+                Style::default().fg(COLOR_DIM),
+            ),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" /", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " /",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Search  ", Style::default().fg(COLOR_DIM)),
-            Span::styled("a", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "a",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 if app.auto_refresh { "On " } else { "Off" },
-                Style::default().fg(if app.auto_refresh { COLOR_SUCCESS } else { COLOR_DIM }),
+                Style::default().fg(if app.auto_refresh {
+                    COLOR_SUCCESS
+                } else {
+                    COLOR_DIM
+                }),
             ),
             Span::styled("  ", Style::default()),
-            Span::styled("+/-", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{}s  ", app.auto_refresh_interval), Style::default().fg(COLOR_DIM)),
-            Span::styled("d", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "+/-",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}s  ", app.auto_refresh_interval),
+                Style::default().fg(COLOR_DIM),
+            ),
+            Span::styled(
+                "d",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Detail  ", Style::default().fg(COLOR_DIM)),
-            Span::styled("j/k", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "j/k",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Nav  ", Style::default().fg(COLOR_DIM)),
-            Span::styled("Tab", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Tab",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Switch  ", Style::default().fg(COLOR_DIM)),
-            Span::styled("r", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "r",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Refresh  ", Style::default().fg(COLOR_DIM)),
-            Span::styled("q", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Quit", Style::default().fg(COLOR_DIM)),
         ])
     };
 
-    let footer = Paragraph::new(footer_text).style(
-        Style::default()
-            .bg(COLOR_HEADER_BG)
-            .fg(Color::White),
-    );
+    let footer =
+        Paragraph::new(footer_text).style(Style::default().bg(COLOR_HEADER_BG).fg(Color::White));
     f.render_widget(footer, area);
 }
 
 fn detail_line(label: &str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("  {:12}", label),
-            Style::default().fg(COLOR_DIM),
-        ),
+        Span::styled(format!("  {:12}", label), Style::default().fg(COLOR_DIM)),
         Span::styled(value, Style::default().fg(Color::White)),
     ])
 }

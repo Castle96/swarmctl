@@ -42,29 +42,8 @@ async fn copy_from_container(
     container_path: &str,
     local_path: &str,
 ) -> anyhow::Result<()> {
-    let tasks = crate::api::task::list_tasks(client.inner()).await?;
-    let task = tasks
-        .into_iter()
-        .find(|t| {
-            let desired = t
-                .desired_state
-                .unwrap_or(bollard::models::TaskState::RUNNING);
-            let is_running = matches!(desired, bollard::models::TaskState::RUNNING);
-            is_running && t.service_id.as_deref() == Some(service_name)
-        })
-        .ok_or_else(|| anyhow::anyhow!("No running tasks for service '{}'", service_name))?;
-
-    let container_id = task
-        .status
-        .as_ref()
-        .and_then(|s| s.container_status.as_ref())
-        .and_then(|cs| cs.container_id.as_deref())
-        .unwrap_or("")
-        .to_string();
-
-    if container_id.is_empty() {
-        return Err(anyhow::anyhow!("Could not determine container ID"));
-    }
+    let (_task_id, container_id) =
+        crate::api::task::running_container_for_service(client, service_name).await?;
 
     let options = DownloadFromContainerOptions {
         path: container_path.to_string(),
@@ -108,29 +87,8 @@ async fn copy_to_container(
     service_name: &str,
     container_path: &str,
 ) -> anyhow::Result<()> {
-    let tasks = crate::api::task::list_tasks(client.inner()).await?;
-    let task = tasks
-        .into_iter()
-        .find(|t| {
-            let desired = t
-                .desired_state
-                .unwrap_or(bollard::models::TaskState::RUNNING);
-            let is_running = matches!(desired, bollard::models::TaskState::RUNNING);
-            is_running && t.service_id.as_deref() == Some(service_name)
-        })
-        .ok_or_else(|| anyhow::anyhow!("No running tasks for service '{}'", service_name))?;
-
-    let container_id = task
-        .status
-        .as_ref()
-        .and_then(|s| s.container_status.as_ref())
-        .and_then(|cs| cs.container_id.as_deref())
-        .unwrap_or("")
-        .to_string();
-
-    if container_id.is_empty() {
-        return Err(anyhow::anyhow!("Could not determine container ID"));
-    }
+    let (_task_id, container_id) =
+        crate::api::task::running_container_for_service(client, service_name).await?;
 
     let data = std::fs::read(local_path)?;
     let options = UploadToContainerOptions {

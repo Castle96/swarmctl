@@ -8,14 +8,13 @@ pub async fn run_stats(
 ) -> anyhow::Result<()> {
     let tasks = crate::api::task::list_tasks(client.inner()).await?;
 
+    // Filter on actual state, not desired state: `docker stats` against a
+    // crash-looping container returns an error per row while still exiting 0.
     let running_tasks: Vec<_> = tasks
         .into_iter()
+        .filter(crate::api::task::task_is_running)
         .filter(|t| {
-            let desired = t
-                .desired_state
-                .unwrap_or(bollard::models::TaskState::RUNNING);
-            let is_running = matches!(desired, bollard::models::TaskState::RUNNING);
-            let service_match = if let Some(ref filter) = service_filter {
+            if let Some(ref filter) = service_filter {
                 t.service_id.as_deref() == Some(filter)
                     || t.name
                         .as_deref()
@@ -23,8 +22,7 @@ pub async fn run_stats(
                         .unwrap_or(false)
             } else {
                 true
-            };
-            is_running && service_match
+            }
         })
         .collect();
 
@@ -156,14 +154,8 @@ pub async fn run_service(
     let tasks = crate::api::task::list_tasks(client.inner()).await?;
     let running_tasks: Vec<_> = tasks
         .into_iter()
-        .filter(|t| {
-            let desired = t
-                .desired_state
-                .unwrap_or(bollard::models::TaskState::RUNNING);
-            let is_running = matches!(desired, bollard::models::TaskState::RUNNING);
-            let service_match = t.service_id.as_deref() == Some(&service_name);
-            is_running && service_match
-        })
+        .filter(crate::api::task::task_is_running)
+        .filter(|t| t.service_id.as_deref() == Some(&service_name))
         .collect();
 
     if running_tasks.is_empty() {

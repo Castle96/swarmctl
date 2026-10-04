@@ -20,7 +20,9 @@ pub struct Cli {
     output: OutputFormat,
 
     /// Watch for changes
-    #[arg(short, long)]
+    // Global so it works in either position: `swarmctl --watch get services`
+    // and `swarmctl get services --watch`.
+    #[arg(short, long, global = true)]
     watch: bool,
 
     /// Namespace (for future use with stacks)
@@ -46,6 +48,10 @@ pub struct Cli {
     /// Path to TLS client key
     #[arg(long)]
     tlskey: Option<String>,
+
+    /// Skip TLS certificate verification (rejected: certificates are always verified)
+    #[arg(long)]
+    skip_tls_verify: bool,
 
     /// Verbose output level
     #[arg(short = 'v', global = true, action = clap::ArgAction::Count)]
@@ -473,7 +479,7 @@ enum Commands {
         #[arg(short, long)]
         patch: String,
 
-        /// Patch type (merge, json, strategic)
+        /// Patch type (only 'merge' is implemented; other values are rejected)
         #[arg(long, default_value = "merge")]
         patch_type: String,
 
@@ -1020,12 +1026,19 @@ impl Cli {
         let cli = Cli::parse();
 
         let try_client = || -> anyhow::Result<DockerClient> {
-            if cli.context.is_some() || cli.host.is_some() || cli.tlscacert.is_some() || cli.tlscert.is_some() || cli.tlskey.is_some() {
+            if cli.context.is_some()
+                || cli.host.is_some()
+                || cli.tlscacert.is_some()
+                || cli.tlscert.is_some()
+                || cli.tlskey.is_some()
+                || cli.skip_tls_verify
+            {
                 let conn_config = crate::api::client::ConnectionConfig {
                     host: cli.host.clone(),
                     tlscacert: cli.tlscacert.clone(),
                     tlscert: cli.tlscert.clone(),
                     tlskey: cli.tlskey.clone(),
+                    skip_tls_verify: cli.skip_tls_verify,
                 };
                 if let Some(ref ctx_name) = cli.context {
                     DockerClient::with_context(Some(ctx_name))
@@ -1037,24 +1050,36 @@ impl Cli {
             }
         };
 
+        #[cfg(feature = "tui")]
         let is_dashboard = matches!(cli.command, Commands::Dashboard);
-        let connection_target = crate::api::docker_check::get_connection_summary(&cli.host, &cli.context);
+        #[cfg(not(feature = "tui"))]
+        let is_dashboard = false;
+        let connection_target =
+            crate::api::docker_check::get_connection_summary(&cli.host, &cli.context);
 
         let client = match try_client() {
             Ok(c) => Some(c),
             Err(e) if is_dashboard => {
-                eprintln!("Warning: Docker not available ({}). Dashboard will launch in offline mode.", e);
+                eprintln!(
+                    "Warning: Docker not available ({}). Dashboard will launch in offline mode.",
+                    e
+                );
                 None
             }
             Err(e) => {
                 let docker_installed = crate::api::docker_check::is_docker_installed();
                 if docker_installed {
-                    eprintln!("Error: Cannot connect to Docker daemon at {}.", connection_target);
+                    eprintln!(
+                        "Error: Cannot connect to Docker daemon at {}.",
+                        connection_target
+                    );
                     eprintln!();
                     eprintln!("  The Docker CLI is installed, but the daemon is not reachable.");
                     eprintln!();
                     eprintln!("  Possible causes:");
-                    eprintln!("    - Docker daemon is not running (try: sudo systemctl start docker)");
+                    eprintln!(
+                        "    - Docker daemon is not running (try: sudo systemctl start docker)"
+                    );
                     eprintln!("    - Incorrect DOCKER_HOST or context configuration");
                     eprintln!("    - SSH connection failed for remote host");
                     eprintln!("    - TLS certificate issues");
@@ -1066,7 +1091,9 @@ impl Cli {
                     eprintln!("    DOCKER_HOST=tcp://<remote-ip>:2375 swarmctl ...");
                     eprintln!();
                     eprintln!("  To create a context for a remote host:");
-                    eprintln!("    docker context create remote --docker host=tcp://<remote-ip>:2375");
+                    eprintln!(
+                        "    docker context create remote --docker host=tcp://<remote-ip>:2375"
+                    );
                     eprintln!("    swarmctl context use remote");
                     eprintln!();
                     eprintln!("  Full error: {}", e);
@@ -1082,23 +1109,30 @@ impl Cli {
             }
         };
 
-        if Self::needs_swarm(&cli.command) {
-            if let Some(ref client) = client {
-                let swarm_active = crate::api::swarm::is_swarm_active(client.inner()).await;
-                println!("Connected to Docker daemon ({})", connection_target);
-                if swarm_active {
-                    println!("Swarm is active on this node.");
-                } else {
-                    println!("No swarm detected on this node.");
-                    println!();
-                    println!("  To initialize a swarm here:");
-                    println!("    swarmctl swarm init");
-                    println!();
-                    println!("  To join an existing remote swarm:");
-                    println!("    swarmctl swarm join <token> --remote <manager-ip:2377>");
-                    println!();
-                    println!("  Continuing without swarm. Some commands may not work.");
-                }
+        // The banner is advisory, so it goes to stderr: on stdout it would
+        // precede the payload and make `swarmctl get services -o json | jq` fail.
+        // It is also skipped entirely for machine-readable output, which avoids
+        // a pointless `inspect_swarm` round trip.
+        let human_output = matches!(
+            cli.output,
+            OutputFormat::Table | OutputFormat::Wide | OutputFormat::Name
+        );
+        if Self::needs_swarm(&cli.command)
+            && human_output
+            && let Some(ref client) = client
+        {
+            let swarm_active = crate::api::swarm::is_swarm_active(client.inner()).await;
+            eprintln!("Connected to Docker daemon ({})", connection_target);
+            if !swarm_active {
+                eprintln!("No swarm detected on this node.");
+                eprintln!();
+                eprintln!("  To initialize a swarm here:");
+                eprintln!("    swarmctl swarm init");
+                eprintln!();
+                eprintln!("  To join an existing remote swarm:");
+                eprintln!("    swarmctl swarm join <token> --remote <manager-ip:2377>");
+                eprintln!();
+                eprintln!("  Continuing without swarm. Some commands may not work.");
             }
         }
 
@@ -1109,7 +1143,9 @@ impl Cli {
         }
 
         let client = client.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Docker daemon is not available. Please install Docker or set DOCKER_HOST.")
+            anyhow::anyhow!(
+                "Docker daemon is not available. Please install Docker or set DOCKER_HOST."
+            )
         })?;
 
         match cli.command {
@@ -1120,21 +1156,22 @@ impl Cli {
                 selector,
                 field_selector,
                 sort_by,
-                all_namespaces,
+                all_namespaces: _,
                 output: get_output,
             } => {
                 let output = get_output.unwrap_or(cli.output);
                 get::run(
-                    &client,
+                    client,
                     resource,
                     name,
                     output,
-                    show_labels,
-                    selector,
-                    field_selector,
-                    sort_by,
-                    all_namespaces,
-                    cli.watch,
+                    get::ListOptions {
+                        show_labels,
+                        selector,
+                        field_selector,
+                        sort_by,
+                        watch: cli.watch,
+                    },
                 )
                 .await?;
             }
@@ -1143,7 +1180,7 @@ impl Cli {
                 name,
                 selector,
             } => {
-                describe::run(&client, resource, name, selector, cli.output).await?;
+                describe::run(client, resource, name, selector, cli.output).await?;
             }
             Commands::Create {
                 resource,
@@ -1153,7 +1190,7 @@ impl Cli {
                 dry_run,
                 output: _,
             } => {
-                create::run(&client, resource, name, filename, stdin, dry_run).await?;
+                create::run(client, resource, name, filename, stdin, dry_run).await?;
             }
             Commands::Delete {
                 resource,
@@ -1167,21 +1204,23 @@ impl Cli {
                 wait,
             } => {
                 delete::run(
-                    &client,
+                    client,
                     resource,
                     name,
-                    selector,
-                    force,
-                    dry_run,
-                    ignore_not_found,
-                    grace_period,
-                    timeout,
-                    wait,
+                    delete::DeleteOptions {
+                        selector,
+                        force,
+                        dry_run,
+                        ignore_not_found,
+                        grace_period,
+                        timeout,
+                        wait_for_delete: wait,
+                    },
                 )
                 .await?;
             }
             Commands::Scale { name, replicas } => {
-                scale::run(&client, &name, replicas).await?;
+                scale::run(client, &name, replicas).await?;
             }
             Commands::Logs {
                 resource,
@@ -1195,16 +1234,18 @@ impl Cli {
                 ignore_errors,
             } => {
                 logs::run(
-                    &client,
+                    client,
                     resource,
                     name,
-                    follow,
-                    tail,
-                    previous,
-                    timestamps,
-                    since,
-                    prefix,
-                    ignore_errors,
+                    logs::LogOptions {
+                        follow,
+                        tail,
+                        previous,
+                        timestamps,
+                        since,
+                        prefix,
+                        ignore_errors,
+                    },
                 )
                 .await?;
             }
@@ -1218,10 +1259,10 @@ impl Cli {
             } => {
                 #[cfg(feature = "tui")]
                 if tui {
-                    ports::run_tui(&client).await?;
+                    ports::run_tui(client).await?;
                 } else {
                     ports::run(
-                        &client,
+                        client,
                         cli.output,
                         available,
                         range_start,
@@ -1232,7 +1273,7 @@ impl Cli {
                 }
                 #[cfg(not(feature = "tui"))]
                 ports::run(
-                    &client,
+                    client,
                     cli.output,
                     available,
                     range_start,
@@ -1242,7 +1283,7 @@ impl Cli {
                 .await?;
             }
             Commands::ClusterInfo => {
-                cluster::run(&client).await?;
+                cluster::run(client).await?;
             }
             #[cfg(feature = "tui")]
             Commands::Dashboard => {
@@ -1291,7 +1332,7 @@ impl Cli {
                 dry_run,
                 output: _,
             } => {
-                apply::run(&client, resource, name, filename, stdin, dry_run).await?;
+                apply::run(client, resource, name, filename, stdin, dry_run).await?;
             }
             Commands::Run {
                 name,
@@ -1299,38 +1340,35 @@ impl Cli {
                 replicas,
                 env,
                 labels,
-                network,
+                network: _,
                 publish,
             } => {
-                run::run(
-                    &client, name, image, replicas, env, labels, network, publish,
-                )
-                .await?;
+                run::run(client, name, image, replicas, env, labels, publish).await?;
             }
             Commands::Events {
                 filter_types,
                 since,
             } => {
-                events::run(&client, filter_types, since).await?;
+                events::run(client, filter_types, since).await?;
             }
             Commands::Exec { service, command } => {
-                exec::run(&client, service, command).await?;
+                exec::run(client, service, command).await?;
             }
             Commands::Attach {
                 service,
                 interactive,
             } => {
-                attach::run(&client, service, interactive).await?;
+                attach::run(client, service, interactive).await?;
             }
             Commands::Top { command } => match command {
                 TopCommand::Service { service, ps_args } => {
-                    top::run_service(&client, service, ps_args).await?;
+                    top::run_service(client, service, ps_args).await?;
                 }
                 TopCommand::Node { name } => {
-                    top::run_node(&client, name).await?;
+                    top::run_node(client, name).await?;
                 }
                 TopCommand::Stats { service } => {
-                    top::run_stats(&client, service).await?;
+                    top::run_stats(client, service).await?;
                 }
             },
             Commands::PortForward {
@@ -1338,36 +1376,33 @@ impl Cli {
                 local_port,
                 container_port,
             } => {
-                port_forward::run(&client, service, local_port, container_port).await?;
+                port_forward::run(client, service, local_port, container_port).await?;
             }
             Commands::Cp { source, target } => {
-                cp::run(&client, source, target).await?;
+                cp::run(client, source, target).await?;
             }
             Commands::Rollout { command } => match command {
                 RolloutCommand::Status { service } => {
-                    rollout::run_status(&client, service).await?;
+                    rollout::run_status(client, service).await?;
                 }
                 RolloutCommand::History { service } => {
-                    rollout::run_history(&client, service).await?;
+                    rollout::run_history(client, service).await?;
                 }
                 RolloutCommand::Restart { service } => {
-                    rollout::run_restart(&client, service).await?;
+                    rollout::run_restart(client, service).await?;
                 }
                 RolloutCommand::Undo { service } => {
-                    rollout::run_undo(&client, service).await?;
+                    rollout::run_undo(client, service).await?;
                 }
                 RolloutCommand::Pause { service } => {
-                    rollout::run_pause(&client, service).await?;
+                    rollout::run_pause(client, service).await?;
                 }
                 RolloutCommand::Resume { service } => {
-                    rollout::run_resume(&client, service).await?;
+                    rollout::run_resume(client, service).await?;
                 }
             },
             Commands::Version => {
-                println!(
-                    "swarmctl version {}",
-                    env!("CARGO_PKG_VERSION")
-                );
+                println!("swarmctl version {}", env!("CARGO_PKG_VERSION"));
                 println!("Docker API version: {}", bollard::API_DEFAULT_VERSION);
             }
             Commands::Completion { shell } => {
@@ -1383,33 +1418,25 @@ impl Cli {
             } => {
                 let resource_str = resource.to_string();
                 let name = name.ok_or_else(|| anyhow::anyhow!("name is required for label"))?;
-                label::run(
-                    &client,
-                    &resource_str,
-                    name,
-                    labels,
-                    overwrite,
-                    all,
-                )
-                .await?;
+                label::run(client, &resource_str, name, labels, overwrite, all).await?;
             }
             Commands::Set { command } => match command {
                 SetCommand::Image { service, image } => {
-                    set::run_image(&client, service, image).await?;
+                    set::run_image(client, service, image).await?;
                 }
                 SetCommand::Env { service, vars } => {
-                    set::run_env(&client, service, vars, false).await?;
+                    set::run_env(client, service, vars, false).await?;
                 }
                 SetCommand::Replicas { service, replicas } => {
-                    set::run_replicas(&client, service, replicas).await?;
+                    set::run_replicas(client, service, replicas).await?;
                 }
             },
             Commands::Drain { name } => {
-                cordon::run_drain(&client, name).await?;
+                cordon::run_drain(client, name).await?;
             }
             Commands::Edit { resource, name } => {
                 let resource_str = resource.to_string();
-                edit::run(&client, &resource_str, name).await?;
+                edit::run(client, &resource_str, name).await?;
             }
             Commands::Diff {
                 resource,
@@ -1417,13 +1444,13 @@ impl Cli {
                 filename,
             } => {
                 let resource_str = resource.to_string();
-                diff::run(&client, &resource_str, name, filename).await?;
+                diff::run(client, &resource_str, name, filename).await?;
             }
             Commands::Patch {
                 resource,
                 name,
                 patch,
-                patch_type: _,
+                patch_type,
                 dry_run,
             } => {
                 let resource_str = resource.to_string();
@@ -1432,13 +1459,21 @@ impl Cli {
                 } else {
                     patch
                 };
-                patch::run(&client, &resource_str, name, patch_content, dry_run).await?;
+                patch::run(
+                    client,
+                    &resource_str,
+                    name,
+                    patch_content,
+                    dry_run,
+                    Some(patch_type),
+                )
+                .await?;
             }
             Commands::Cordon { name } => {
-                cordon::run_cordon(&client, name).await?;
+                cordon::run_cordon(client, name).await?;
             }
             Commands::Uncordon { name } => {
-                cordon::run_uncordon(&client, name).await?;
+                cordon::run_uncordon(client, name).await?;
             }
             Commands::Explain {
                 resource,
@@ -1455,39 +1490,46 @@ impl Cli {
                 timeout,
                 jsonpath: _,
             } => {
+                // Reject unsupported kinds up front rather than after connecting.
                 let resource_str = resource.to_string();
-                wait::run(&client, &resource_str, name, condition, timeout).await?;
+                if !wait::resource_type_supported(resource) {
+                    anyhow::bail!(
+                        "wait is not supported for {}; supported kinds: services, tasks, nodes",
+                        resource_str.to_lowercase()
+                    );
+                }
+                wait::run(client, &resource_str, name, condition, timeout).await?;
             }
             Commands::Stack { command } => match command {
                 StackCommand::Deploy { compose_file, name } => {
-                    stack::deploy(&client, compose_file, name).await?;
+                    stack::deploy(client, compose_file, name).await?;
                 }
                 StackCommand::Rm { name } => {
-                    stack::remove(&client, &name).await?;
+                    stack::remove(client, &name).await?;
                 }
                 StackCommand::Ls => {
-                    stack::list(&client).await?;
+                    stack::list(client).await?;
                 }
             },
             Commands::Config { command } => match command {
                 ConfigCommand::Ls => {
-                    config::run_ls(&client, cli.output).await?;
+                    config::run_ls(client, cli.output).await?;
                 }
                 ConfigCommand::Create {
                     name,
                     from_file,
                     stdin,
                 } => {
-                    config::run_create(&client, name, from_file, stdin).await?;
+                    config::run_create(client, name, from_file, stdin).await?;
                 }
                 ConfigCommand::Rm { name } => {
-                    config::run_rm(&client, name).await?;
+                    config::run_rm(client, name).await?;
                 }
                 ConfigCommand::Inspect { name } => {
-                    config::run_inspect(&client, name, cli.output).await?;
+                    config::run_inspect(client, name, cli.output).await?;
                 }
                 ConfigCommand::View { name } => {
-                    config::run_view(&client, name).await?;
+                    config::run_view(client, name).await?;
                 }
             },
             Commands::ApiResources => {
@@ -1499,7 +1541,7 @@ impl Cli {
                 remove,
                 overwrite,
             } => {
-                taint::run(&client, name, taints, remove, overwrite).await?;
+                taint::run(client, name, taints, remove, overwrite).await?;
             }
             Commands::Replace {
                 resource,
@@ -1508,31 +1550,31 @@ impl Cli {
                 dry_run,
                 force,
             } => {
-                replace::run(&client, resource, filename, stdin, dry_run, force).await?;
+                replace::run(client, resource, filename, stdin, dry_run, force).await?;
             }
             Commands::Swarm { command } => match command {
                 SwarmCommand::Init { advertise_addr } => {
-                    swarm::run_init(&client, advertise_addr).await?;
+                    swarm::run_init(client, advertise_addr).await?;
                 }
                 SwarmCommand::Join {
                     token,
                     remote,
                     advertise_addr,
                 } => {
-                    swarm::run_join(&client, token, remote, advertise_addr).await?;
+                    swarm::run_join(client, token, remote, advertise_addr).await?;
                 }
                 SwarmCommand::Leave { force } => {
-                    swarm::run_leave(&client, force).await?;
+                    swarm::run_leave(client, force).await?;
                 }
                 SwarmCommand::Token {
                     worker,
                     manager,
                     rotate,
                 } => {
-                    swarm::run_token(&client, worker, manager, rotate).await?;
+                    swarm::run_token(client, worker, manager, rotate).await?;
                 }
                 SwarmCommand::Status => {
-                    swarm::run_status(&client).await?;
+                    swarm::run_status(client).await?;
                 }
             },
             Commands::Vault { command } => match command {
@@ -1555,65 +1597,69 @@ impl Cli {
                 no_tui,
             } => {
                 if json || no_tui {
-                    discover::run_scan(&client, subnet.clone(), json).await?;
+                    discover::run_scan(client, subnet.clone(), json).await?;
                 } else {
                     #[cfg(feature = "tui")]
                     {
-                        tui::discover::run_discovery_tui(&client, subnet.clone()).await?;
+                        tui::discover::run_discovery_tui(client, subnet.clone()).await?;
                     }
                     #[cfg(not(feature = "tui"))]
                     {
-                        discover::run_interactive(&client, subnet.clone()).await?;
+                        discover::run_interactive(client, subnet.clone()).await?;
                     }
                 }
-            },
+            }
             Commands::Promote { name } => {
-                let node_id = crate::api::node::get_node_id_by_hostname(client.inner(), &name).await?;
-                let node_id = node_id.ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
+                let node_id =
+                    crate::api::node::get_node_id_by_hostname(client.inner(), &name).await?;
+                let node_id =
+                    node_id.ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
                 crate::api::node::promote_node(client.inner(), &node_id).await?;
                 println!("Node {} promoted to manager.", name);
             }
             Commands::Demote { name } => {
-                let node_id = crate::api::node::get_node_id_by_hostname(client.inner(), &name).await?;
-                let node_id = node_id.ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
+                let node_id =
+                    crate::api::node::get_node_id_by_hostname(client.inner(), &name).await?;
+                let node_id =
+                    node_id.ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
                 crate::api::node::demote_node(client.inner(), &node_id).await?;
                 println!("Node {} demoted to worker.", name);
             }
             Commands::Volume { command } => match command {
                 VolumeCommand::Ls { output } => {
                     let output = output.unwrap_or(cli.output);
-                    volume::run_ls(&client, output).await?;
+                    volume::run_ls(client, output).await?;
                 }
                 VolumeCommand::Inspect { name, output } => {
                     let output = output.unwrap_or(cli.output);
-                    volume::run_inspect(&client, name, output).await?;
+                    volume::run_inspect(client, name, output).await?;
                 }
                 VolumeCommand::Create {
                     name,
                     driver,
                     labels,
                 } => {
-                    volume::run_create(&client, name, driver, labels).await?;
+                    volume::run_create(client, name, driver, labels).await?;
                 }
                 VolumeCommand::Rm { name, force } => {
-                    volume::run_rm(&client, name, force).await?;
+                    volume::run_rm(client, name, force).await?;
                 }
             },
             Commands::System { command } => match command {
-                SystemCommand::Info { json } => system::info(&client, json).await?,
-                SystemCommand::Df => system::df(&client).await?,
-                SystemCommand::Ping => system::ping(&client).await?,
+                SystemCommand::Info { json } => system::info(client, json).await?,
+                SystemCommand::Df => system::df(client).await?,
+                SystemCommand::Ping => system::ping(client).await?,
             },
             Commands::Failover { command } => match command {
                 FailoverCommand::Status { output } => {
                     let output = output.unwrap_or(cli.output);
-                    failover::run_status(&client, output).await?;
+                    failover::run_status(client, output).await?;
                 }
                 FailoverCommand::Enable => {
-                    failover::run_enable(&client).await?;
+                    failover::run_enable(client).await?;
                 }
                 FailoverCommand::Disable => {
-                    failover::run_disable(&client).await?;
+                    failover::run_disable(client).await?;
                 }
                 FailoverCommand::Migrate {
                     volume,
@@ -1622,7 +1668,7 @@ impl Cli {
                     output,
                 } => {
                     let output = output.unwrap_or(cli.output);
-                    failover::run_migrate(&client, volume, from, to, output).await?;
+                    failover::run_migrate(client, volume, from, to, output).await?;
                 }
             },
         }
@@ -1668,6 +1714,137 @@ impl Cli {
                 | Commands::Volume { .. }
                 | Commands::System { .. }
                 | Commands::Failover { .. }
+                | Commands::Swarm { .. }
+                | Commands::Discover { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::{CommandFactory, Parser};
+
+    /// Every command must be constructible; clap panics at runtime on invalid
+    /// definitions (duplicate shorts, bad value parsers, conflicting args).
+    #[test]
+    fn command_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn help_is_generated_without_docker() {
+        match Cli::try_parse_from(["swarmctl", "--help"]) {
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp),
+            Ok(_) => panic!("--help should not produce a parsed command"),
+        }
+    }
+
+    #[test]
+    fn version_flag_is_supported() {
+        assert!(Cli::try_parse_from(["swarmctl", "version"]).is_ok());
+    }
+
+    #[test]
+    fn parses_documented_get_invocations() {
+        for argv in [
+            vec!["swarmctl", "get", "services"],
+            vec!["swarmctl", "get", "nodes"],
+            vec!["swarmctl", "get", "services", "-o", "json"],
+            vec!["swarmctl", "get", "services", "--selector", "app=web"],
+            vec!["swarmctl", "get", "services", "--watch"],
+            vec!["swarmctl", "-o", "yaml", "get", "tasks"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "failed to parse: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_mutating_and_group_commands() {
+        for argv in [
+            vec!["swarmctl", "scale", "web", "3"],
+            vec!["swarmctl", "delete", "services", "web"],
+            vec!["swarmctl", "describe", "services", "web"],
+            vec!["swarmctl", "logs", "service", "web", "--follow"],
+            vec!["swarmctl", "stack", "ls"],
+            vec!["swarmctl", "context", "ls"],
+            vec!["swarmctl", "swarm", "status"],
+            vec!["swarmctl", "vault", "status"],
+            vec!["swarmctl", "volume", "ls"],
+            vec!["swarmctl", "system", "info"],
+            vec!["swarmctl", "failover", "status"],
+            vec!["swarmctl", "events", "--since", "1h"],
+            vec!["swarmctl", "ports", "--available", "--protocol", "tcp"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "failed to parse: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_arguments() {
+        for argv in [
+            vec!["swarmctl", "get", "services", "-o", "notaformat"],
+            vec!["swarmctl", "definitely-not-a-command"],
+            vec!["swarmctl", "scale"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "unexpectedly parsed: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_host_and_context_flags_are_accepted() {
+        assert!(
+            Cli::try_parse_from(["swarmctl", "--host", "tcp://10.0.0.1:2376", "get", "nodes"])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["swarmctl", "-c", "prod", "get", "nodes"]).is_ok());
+    }
+
+    #[test]
+    fn shell_completions_generate_for_all_shells() {
+        use clap_complete::Shell;
+        let mut cmd = Cli::command();
+        let app_name = cmd.get_name().to_string();
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::PowerShell] {
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut cmd, app_name.clone(), &mut buf);
+            assert!(!buf.is_empty(), "no completions generated for {shell}");
+        }
+    }
+
+    #[test]
+    fn swarm_only_commands_are_recognised() {
+        for argv in [
+            vec!["swarmctl", "get", "nodes"],
+            vec!["swarmctl", "stack", "ls"],
+            vec!["swarmctl", "swarm", "status"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            assert!(
+                Cli::needs_swarm(&cli.command),
+                "expected swarm requirement: {argv:?}"
+            );
+        }
+        for argv in [
+            vec!["swarmctl", "version"],
+            vec!["swarmctl", "completion", "bash"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            assert!(
+                !Cli::needs_swarm(&cli.command),
+                "expected no swarm requirement: {argv:?}"
+            );
+        }
+        // Ensure the enum stays exercised so new variants get classified.
+        let _ = std::mem::discriminant(&Commands::Version);
     }
 }

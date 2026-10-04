@@ -1,7 +1,5 @@
 use crate::api::client::DockerClient;
-use crate::api::port::{
-    get_available_ports, get_port_summary, list_service_ports, list_used_ports,
-};
+use crate::api::port::{get_available_ports, list_service_ports, list_used_ports};
 use crate::cli::root::OutputFormat;
 use crate::models::port::ServicePortInfo;
 use crate::utils::printer::{print_json, print_yaml};
@@ -232,7 +230,10 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+#[cfg(feature = "tui")]
 pub async fn run_tui(client: &DockerClient) -> Result<()> {
+    use crate::api::port::get_port_summary;
+
     println!("\x1b[2J\x1b[H");
     println!(
         "{}",

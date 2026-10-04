@@ -30,10 +30,7 @@ async fn docker_socket_request(
 
     let socket_path = std::env::var("DOCKER_HOST")
         .ok()
-        .and_then(|h| {
-            h.strip_prefix("unix://")
-                .map(|s| s.to_string())
-        })
+        .and_then(|h| h.strip_prefix("unix://").map(|s| s.to_string()))
         .unwrap_or_else(|| "/var/run/docker.sock".to_string());
 
     let mut stream = UnixStream::connect(&socket_path).await?;
@@ -54,10 +51,7 @@ async fn docker_socket_request(
     stream.read_to_end(&mut response).await?;
 
     let response_str = String::from_utf8_lossy(&response);
-    let body_start = response_str
-        .find("\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(0);
+    let body_start = response_str.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
     let resp_body = &response_str[body_start..];
 
     if resp_body.is_empty() {
@@ -86,8 +80,7 @@ pub async fn run(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' has no ID", name))?;
     let version = node.version.and_then(|v| v.index).unwrap_or(0);
 
-    let node_json =
-        docker_socket_request("GET", &format!("/nodes/{}", node_id), None).await?;
+    let node_json = docker_socket_request("GET", &format!("/nodes/{}", node_id), None).await?;
 
     let spec = node_json
         .get("Spec")
@@ -138,31 +131,21 @@ pub async fn run(
 
     for remove_str in &remove {
         let key = if remove_str.contains(':') {
-            remove_str.splitn(2, ':').next().unwrap_or(remove_str)
+            remove_str.split(':').next().unwrap_or(remove_str)
         } else {
             remove_str
         };
         current_taints.retain(|t| t.key.as_deref() != Some(key));
     }
 
-    let mut spec = spec
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    spec.insert(
-        "Taints".to_string(),
-        serde_json::to_value(&current_taints)?,
-    );
+    let mut spec = spec.as_object().cloned().unwrap_or_default();
+    spec.insert("Taints".to_string(), serde_json::to_value(&current_taints)?);
 
-    let mut full_node = node_json
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let mut full_node = node_json.as_object().cloned().unwrap_or_default();
     full_node.insert("Spec".to_string(), serde_json::Value::Object(spec));
 
     let path = format!("/nodes/{}?version={}", node_id, version);
-    docker_socket_request("POST", &path, Some(&serde_json::Value::Object(full_node)))
-        .await?;
+    docker_socket_request("POST", &path, Some(&serde_json::Value::Object(full_node))).await?;
 
     if !taints.is_empty() {
         println!("Node '{}' taints updated", name);

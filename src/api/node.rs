@@ -10,10 +10,7 @@ pub async fn list_nodes(docker: &Docker) -> anyhow::Result<Vec<Node>> {
 
 pub async fn promote_node(docker: &Docker, node_id: &str) -> anyhow::Result<()> {
     let node = docker.inspect_node(node_id).await?;
-    let version = node
-        .version
-        .and_then(|v| v.index)
-        .unwrap_or(0);
+    let version = node.version.and_then(|v| v.index).unwrap_or(0);
     let mut spec = node.spec.unwrap_or_default();
     spec.role = Some(bollard::models::NodeSpecRoleEnum::MANAGER);
 
@@ -26,10 +23,7 @@ pub async fn promote_node(docker: &Docker, node_id: &str) -> anyhow::Result<()> 
 
 pub async fn demote_node(docker: &Docker, node_id: &str) -> anyhow::Result<()> {
     let node = docker.inspect_node(node_id).await?;
-    let version = node
-        .version
-        .and_then(|v| v.index)
-        .unwrap_or(0);
+    let version = node.version.and_then(|v| v.index).unwrap_or(0);
     let mut spec = node.spec.unwrap_or_default();
     spec.role = Some(bollard::models::NodeSpecRoleEnum::WORKER);
 
@@ -46,10 +40,10 @@ pub async fn get_node_id_by_hostname(
 ) -> anyhow::Result<Option<String>> {
     let nodes = list_nodes(docker).await?;
     for node in &nodes {
-        if let Some(ref spec) = node.spec {
-            if spec.name.as_deref() == Some(hostname) {
-                return Ok(node.id.clone());
-            }
+        if let Some(ref spec) = node.spec
+            && spec.name.as_deref() == Some(hostname)
+        {
+            return Ok(node.id.clone());
         }
     }
     Ok(None)
@@ -60,7 +54,6 @@ pub async fn get_managers(docker: &Docker) -> anyhow::Result<Vec<Node>> {
     filter.insert("role".to_string(), vec!["manager".to_string()]);
     let options = bollard::query_parameters::ListNodesOptions {
         filters: Some(filter),
-        ..Default::default()
     };
     Ok(docker.list_nodes(Some(options)).await?)
 }
@@ -70,7 +63,6 @@ pub async fn get_workers(docker: &Docker) -> anyhow::Result<Vec<Node>> {
     filter.insert("role".to_string(), vec!["worker".to_string()]);
     let options = bollard::query_parameters::ListNodesOptions {
         filters: Some(filter),
-        ..Default::default()
     };
     Ok(docker.list_nodes(Some(options)).await?)
 }

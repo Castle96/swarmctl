@@ -131,6 +131,7 @@ pub async fn get_available_ports(
     Ok(available)
 }
 
+#[cfg(feature = "tui")]
 pub async fn get_port_summary(docker: &Docker) -> Result<PortSummary> {
     let services = docker.list_services(None::<ListServicesOptions>).await?;
 
@@ -186,6 +187,7 @@ pub async fn get_port_summary(docker: &Docker) -> Result<PortSummary> {
     })
 }
 
+#[cfg(feature = "tui")]
 #[derive(Debug, Clone)]
 pub struct PortSummary {
     pub used_tcp: Vec<u16>,

@@ -94,7 +94,7 @@ pub async fn run_inspect(
 
     match output {
         OutputFormat::Table => {
-            let spec = config.spec.as_ref().unwrap();
+            let spec = config.spec.clone().unwrap_or_default();
             println!(
                 "Name:\t{}",
                 spec.name.as_ref().unwrap_or(&"unknown".to_string())
@@ -117,12 +117,12 @@ pub async fn run_inspect(
         OutputFormat::Json => print_json(&config)?,
         OutputFormat::Yaml => print_yaml(&config)?,
         OutputFormat::Wide => {
-            let spec = config.spec.as_ref().unwrap();
+            let spec = config.spec.clone().unwrap_or_default();
             println!("Name:\t{}", spec.name.as_deref().unwrap_or("unknown"));
             println!("ID:\t{}", config.id.unwrap_or_default());
         }
         OutputFormat::Name => {
-            let spec = config.spec.as_ref().unwrap();
+            let spec = config.spec.clone().unwrap_or_default();
             println!("config/{}", spec.name.as_deref().unwrap_or("unknown"));
         }
     }

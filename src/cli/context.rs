@@ -80,19 +80,26 @@ pub async fn run_create(
     tlscert: Option<String>,
     tlskey: Option<String>,
 ) -> anyhow::Result<()> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let context_dir = std::path::PathBuf::from(&home)
-        .join(".docker")
+    let context_dir = crate::api::docker_check::docker_config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".docker"))
         .join("contexts")
         .join("meta")
         .join(&name);
 
     if context_dir.exists() {
-        anyhow::bail!("Context '{}' already exists. Use 'swarmctl context rm {}' to remove it first.", name, name);
+        anyhow::bail!(
+            "Context '{}' already exists. Use 'swarmctl context rm {}' to remove it first.",
+            name,
+            name
+        );
     }
 
-    fs::create_dir_all(&context_dir)
-        .with_context(|| format!("Failed to create context directory: {}", context_dir.display()))?;
+    fs::create_dir_all(&context_dir).with_context(|| {
+        format!(
+            "Failed to create context directory: {}",
+            context_dir.display()
+        )
+    })?;
 
     let mut endpoints = HashMap::new();
     let mut docker_endpoint = serde_json::json!({
@@ -145,9 +152,8 @@ pub async fn run_create(
 }
 
 pub async fn run_rm(name: String) -> anyhow::Result<()> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let context_dir = std::path::PathBuf::from(&home)
-        .join(".docker")
+    let context_dir = crate::api::docker_check::docker_config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".docker"))
         .join("contexts")
         .join("meta")
         .join(&name);
@@ -157,18 +163,22 @@ pub async fn run_rm(name: String) -> anyhow::Result<()> {
     }
 
     // Check if this is the currently active context
-    if let Ok(Some(current)) = context::get_current_context_name() {
-        if current == name {
-            anyhow::bail!(
-                "Cannot remove context '{}' - it is the currently active context.\n\
+    if let Ok(Some(current)) = context::get_current_context_name()
+        && current == name
+    {
+        anyhow::bail!(
+            "Cannot remove context '{}' - it is the currently active context.\n\
                  Switch to another context first: swarmctl context use <other-context>",
-                name
-            );
-        }
+            name
+        );
     }
 
-    fs::remove_dir_all(&context_dir)
-        .with_context(|| format!("Failed to remove context directory: {}", context_dir.display()))?;
+    fs::remove_dir_all(&context_dir).with_context(|| {
+        format!(
+            "Failed to remove context directory: {}",
+            context_dir.display()
+        )
+    })?;
 
     println!("Context '{}' removed.", name);
     Ok(())

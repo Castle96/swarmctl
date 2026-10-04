@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tabled::Tabled;
 
-#[derive(Tabled, Serialize)]
+#[derive(Clone, Tabled, Serialize)]
 pub struct ContextRow {
     pub name: String,
     pub description: String,
@@ -15,5 +15,17 @@ fn display_current(current: &bool) -> String {
         "*".to_string()
     } else {
         String::new()
+    }
+}
+
+impl crate::models::RowLabels for ContextRow {
+    fn labels(&self) -> &str {
+        ""
+    }
+}
+
+impl crate::models::Named for ContextRow {
+    fn row_name(&self) -> String {
+        self.name.clone()
     }
 }

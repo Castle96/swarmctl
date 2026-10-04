@@ -15,7 +15,11 @@ pub async fn run(
     let options = bollard::query_parameters::EventsOptions {
         since: since.map(|s| normalize_time(&s)),
         until: None,
-        filters: if filters.is_empty() { None } else { Some(filters) },
+        filters: if filters.is_empty() {
+            None
+        } else {
+            Some(filters)
+        },
     };
 
     let mut stream = client.inner().events(Some(options));

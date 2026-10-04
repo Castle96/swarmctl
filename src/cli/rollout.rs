@@ -156,8 +156,15 @@ pub async fn run_pause(client: &DockerClient, service_name: String) -> anyhow::R
         .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&service_name))
         .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name))?;
 
-    eprintln!("Warning: Service rollout pause is not supported by the Docker API in this bollard version");
-    Ok(())
+    // Previously this warned on stderr and returned Ok(()), so a CI script like
+    // `rollout pause svc && deploy.sh` sailed through with exit 0.
+    anyhow::bail!(
+        "Service rollout pause is not implemented: the Docker Engine API has no \
+         endpoint for pausing a service rollout.\n\
+         \n\
+         To hold a rollout, set the service to the desired replica count first and \
+         scale down the others, or cordon the target nodes."
+    )
 }
 
 pub async fn run_resume(client: &DockerClient, service_name: String) -> anyhow::Result<()> {
@@ -167,8 +174,15 @@ pub async fn run_resume(client: &DockerClient, service_name: String) -> anyhow::
         .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&service_name))
         .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name))?;
 
-    eprintln!("Warning: Service rollout resume is not supported by the Docker API in this bollard version");
-    Ok(())
+    // Previously this warned on stderr and returned Ok(()), so a CI script like
+    // `rollout pause svc && deploy.sh` sailed through with exit 0.
+    anyhow::bail!(
+        "Service rollout resume is not implemented: the Docker Engine API has no \
+         endpoint for pausing a service rollout.\n\
+         \n\
+         To hold a rollout, set the service to the desired replica count first and \
+         scale down the others, or cordon the target nodes."
+    )
 }
 
 pub async fn run_restart(client: &DockerClient, service_name: String) -> anyhow::Result<()> {
@@ -179,13 +193,23 @@ pub async fn run_restart(client: &DockerClient, service_name: String) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name))?;
 
     let version = existing.version.and_then(|v| v.index).unwrap_or(0) as i32;
-    let mut spec = existing.spec.unwrap_or_default();
+    let mut spec = existing.spec.clone().unwrap_or_default();
 
-    if let Some(mode) = &mut spec.mode
-        && let Some(ref mut replicated) = mode.replicated {
-            let current = replicated.replicas.unwrap_or(0);
-            replicated.replicas = Some(current + 1);
-        }
+    // A restart is a redeploy, not a scale change. The previous implementation
+    // incremented `replicas`, so restarting a 3-replica service left it running
+    // 4 replicas permanently.
+    //
+    // Bollard's `UpdateServiceOptions` has no `force` field, so the redeploy is
+    // requested the Docker-native way: bumping `Spec.TaskTemplate.ForceUpdate`
+    // makes the scheduler replace running tasks without touching desired state.
+    if let Some(template) = spec.task_template.as_mut() {
+        template.force_update = Some(template.force_update.unwrap_or(0) + 1);
+    } else {
+        anyhow::bail!(
+            "Service '{}' has no task template to redeploy",
+            service_name
+        );
+    }
 
     let opts = bollard::query_parameters::UpdateServiceOptionsBuilder::default()
         .version(version)
@@ -197,21 +221,17 @@ pub async fn run_restart(client: &DockerClient, service_name: String) -> anyhow:
         .await?;
     println!("Service '{}' restart initiated", service_name);
 
+    // Count tasks by their *actual* state. Reading desired_state here would
+    // report the pre-restart situation, since the redeploy is asynchronous.
     let mut filters = std::collections::HashMap::new();
     filters.insert("service".to_string(), vec![service_name.clone()]);
     let task_opts = bollard::query_parameters::ListTasksOptions {
-        filters: Some(filters.clone()),
+        filters: Some(filters),
     };
     let tasks = client.inner().list_tasks(Some(task_opts)).await?;
     let running_count = tasks
         .iter()
-        .filter(|t| {
-            matches!(
-                t.desired_state
-                    .unwrap_or(bollard::models::TaskState::RUNNING),
-                bollard::models::TaskState::RUNNING
-            )
-        })
+        .filter(|t| crate::api::task::task_is_running(t))
         .count();
     println!("  -> {} running tasks", running_count);
 

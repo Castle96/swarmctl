@@ -92,10 +92,7 @@ async fn create_network(
     }
 
     if dry_run {
-        println!(
-            "[dry run] Would create network '{}'",
-            final_spec.name
-        );
+        println!("[dry run] Would create network '{}'", final_spec.name);
         return Ok(());
     }
 

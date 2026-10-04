@@ -1,7 +1,7 @@
 use bollard::Docker;
 use bollard::models::Volume;
-use bollard::query_parameters::{ListVolumesOptions, RemoveVolumeOptions};
 use bollard::models::VolumeCreateRequest;
+use bollard::query_parameters::{ListVolumesOptions, RemoveVolumeOptions};
 use std::collections::HashMap;
 
 pub async fn list_volumes(docker: &Docker) -> anyhow::Result<Vec<Volume>> {
@@ -17,9 +17,7 @@ pub async fn inspect_volume(docker: &Docker, name: &str) -> anyhow::Result<Volum
 }
 
 pub async fn remove_volume(docker: &Docker, name: &str, force: bool) -> anyhow::Result<()> {
-    let options = RemoveVolumeOptions {
-        force,
-    };
+    let options = RemoveVolumeOptions { force };
     docker.remove_volume(name, Some(options)).await?;
     Ok(())
 }
@@ -40,7 +38,10 @@ pub async fn create_volume(
 }
 
 #[allow(dead_code)]
-pub async fn get_volume_mountpoints(docker: &Docker, volume_name: &str) -> anyhow::Result<Vec<String>> {
+pub async fn get_volume_mountpoints(
+    docker: &Docker,
+    volume_name: &str,
+) -> anyhow::Result<Vec<String>> {
     let options = bollard::query_parameters::ListContainersOptions {
         all: true,
         ..Default::default()
@@ -51,10 +52,10 @@ pub async fn get_volume_mountpoints(docker: &Docker, volume_name: &str) -> anyho
     for container in containers {
         if let Some(mounts) = &container.mounts {
             for mount in mounts {
-                if mount.name.as_deref() == Some(volume_name) {
-                    if let Some(source) = &mount.source {
-                        mountpoints.push(source.clone());
-                    }
+                if mount.name.as_deref() == Some(volume_name)
+                    && let Some(source) = &mount.source
+                {
+                    mountpoints.push(source.clone());
                 }
             }
         }

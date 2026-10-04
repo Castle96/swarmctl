@@ -1,6 +1,7 @@
 use crate::api::client::DockerClient;
 use crate::cli::root::OutputFormat;
 use crate::models::failover::FailoverEvent;
+use anyhow::Context;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -32,17 +33,30 @@ impl FailoverManager {
 
         let events = self.monitor.check_and_update(&nodes, &tasks);
 
-        let mut stored_events = self.events.lock().unwrap();
-        for event in events {
-            stored_events.push(event);
-        }
+        // Take the guard once. The previous version held `stored_events` from
+        // the enclosing scope and then locked the same non-reentrant Mutex again
+        // inside the `try_recv` loop, which deadlocks as soon as the loop body
+        // runs — i.e. on the second observation.
+        let mut stored = self.events.lock().unwrap();
+        stored.extend(events);
+        drop(stored);
 
         while let Ok(event) = self.event_rx.try_recv() {
-            let mut stored_events = self.events.lock().unwrap();
-            stored_events.push(event);
+            self.events.lock().unwrap().push(event);
         }
 
         Ok(())
+    }
+
+    /// Reflect the node list as it stands right now.
+    pub async fn snapshot(&mut self, client: &DockerClient) -> anyhow::Result<()> {
+        let nodes = client.inner().list_nodes(None).await?;
+        self.monitor.observe_current(&nodes);
+        Ok(())
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.monitor.set_enabled(enabled);
     }
 
     pub fn get_state(&self) -> crate::models::failover::FailoverState {
@@ -52,18 +66,32 @@ impl FailoverManager {
     pub fn get_events(&self) -> Vec<FailoverEvent> {
         self.events.lock().unwrap().clone()
     }
-
-    pub fn set_enabled(&self, enabled: bool) {
-        self.monitor.set_enabled(enabled);
-    }
 }
 
-pub async fn run_status(
-    client: &DockerClient,
-    _output: OutputFormat,
-) -> anyhow::Result<()> {
+/// How long `failover status` watches for changes before reporting.
+const OBSERVE_SECONDS: u64 = 6;
+const OBSERVE_INTERVAL_SECONDS: u64 = 2;
+
+pub async fn run_status(client: &DockerClient, _output: OutputFormat) -> anyhow::Result<()> {
+    let enabled = load_enabled();
+
     let mut manager = FailoverManager::new();
+    manager.set_enabled(enabled);
+
+    // Baseline sample, so later observations can detect transitions...
     manager.check(client).await?;
+    // ...and a direct snapshot, so a node that is down *now* is reported even
+    // though no transition has been observed yet.
+    manager.snapshot(client).await?;
+
+    eprintln!("Observing for {}s...", OBSERVE_SECONDS);
+    let mut elapsed = 0;
+    while elapsed < OBSERVE_SECONDS {
+        tokio::time::sleep(std::time::Duration::from_secs(OBSERVE_INTERVAL_SECONDS)).await;
+        elapsed += OBSERVE_INTERVAL_SECONDS;
+        manager.check(client).await?;
+    }
+    manager.snapshot(client).await?;
 
     let state = manager.get_state();
     let events = manager.get_events();
@@ -71,7 +99,10 @@ pub async fn run_status(
     println!();
     println!("Failover Status");
     println!("═══════════════════════════════════════");
-    println!("  Enabled:      {}", if state.enabled { "Yes" } else { "No" });
+    println!(
+        "  Enabled:      {}",
+        if state.enabled { "Yes" } else { "No" }
+    );
     println!("  Failed nodes: {}", state.failed_nodes.len());
     for node in &state.failed_nodes {
         println!("    - {}", node);
@@ -86,23 +117,68 @@ pub async fn run_status(
         println!("  ─────────────────────────────────────");
         for event in events.iter().rev().take(20) {
             match event {
-                FailoverEvent::NodeDown { node_name, timestamp, .. } => {
+                FailoverEvent::NodeDown {
+                    node_name,
+                    timestamp,
+                    ..
+                } => {
                     println!("  [{}] NODE_DOWN: {}", timestamp, node_name);
                 }
-                FailoverEvent::TaskRescheduled { service_name, to_node, timestamp, .. } => {
-                    println!("  [{}] TASK_RESCHEDULED: {} -> {}", timestamp, service_name, to_node);
+                FailoverEvent::TaskRescheduled {
+                    service_name,
+                    to_node,
+                    timestamp,
+                    ..
+                } => {
+                    println!(
+                        "  [{}] TASK_RESCHEDULED: {} -> {}",
+                        timestamp, service_name, to_node
+                    );
                 }
-                FailoverEvent::DataMigrationStarted { volume_name, to_node, timestamp, .. } => {
-                    println!("  [{}] MIGRATION_STARTED: {} -> {}", timestamp, volume_name, to_node);
+                FailoverEvent::DataMigrationStarted {
+                    volume_name,
+                    to_node,
+                    timestamp,
+                    ..
+                } => {
+                    println!(
+                        "  [{}] MIGRATION_STARTED: {} -> {}",
+                        timestamp, volume_name, to_node
+                    );
                 }
-                FailoverEvent::DataMigrationCompleted { volume_name, bytes_copied, duration_ms, timestamp, .. } => {
-                    println!("  [{}] MIGRATION_COMPLETED: {} ({} bytes, {}ms)", timestamp, volume_name, bytes_copied, duration_ms);
+                FailoverEvent::DataMigrationCompleted {
+                    volume_name,
+                    bytes_copied,
+                    duration_ms,
+                    timestamp,
+                    ..
+                } => {
+                    println!(
+                        "  [{}] MIGRATION_COMPLETED: {} ({} bytes, {}ms)",
+                        timestamp, volume_name, bytes_copied, duration_ms
+                    );
                 }
-                FailoverEvent::DataMigrationFailed { volume_name, error, timestamp, .. } => {
-                    println!("  [{}] MIGRATION_FAILED: {} - {}", timestamp, volume_name, error);
+                FailoverEvent::DataMigrationFailed {
+                    volume_name,
+                    error,
+                    timestamp,
+                    ..
+                } => {
+                    println!(
+                        "  [{}] MIGRATION_FAILED: {} - {}",
+                        timestamp, volume_name, error
+                    );
                 }
-                FailoverEvent::ContainerRedeployed { service_name, target_node, timestamp, .. } => {
-                    println!("  [{}] CONTAINER_REDEPLOYED: {} -> {}", timestamp, service_name, target_node);
+                FailoverEvent::ContainerRedeployed {
+                    service_name,
+                    target_node,
+                    timestamp,
+                    ..
+                } => {
+                    println!(
+                        "  [{}] CONTAINER_REDEPLOYED: {} -> {}",
+                        timestamp, service_name, target_node
+                    );
                 }
             }
         }
@@ -112,47 +188,69 @@ pub async fn run_status(
     Ok(())
 }
 
+fn state_file() -> std::path::PathBuf {
+    crate::utils::paths::failover_file()
+}
+
+fn load_enabled() -> bool {
+    std::fs::read_to_string(state_file())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("enabled").and_then(|e| e.as_bool()))
+        .unwrap_or(false)
+}
+
+fn save_enabled(enabled: bool) -> anyhow::Result<()> {
+    let path = state_file();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::json!({ "enabled": enabled }).to_string())
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
 pub async fn run_enable(_client: &DockerClient) -> anyhow::Result<()> {
-    let manager = FailoverManager::new();
-    manager.set_enabled(true);
-    println!("Failover monitoring enabled.");
-    println!("  The system will now monitor for node failures and automatically reschedule containers.");
+    // Previously this flipped a flag on a manager that was immediately dropped,
+    // so nothing was persisted and `status` never showed it.
+    save_enabled(true)?;
+    println!("Failover event monitoring enabled.");
+    println!("  `swarmctl failover status` will now report node-down and redeploy events.");
+    println!("  Note: swarmctl does not reschedule containers automatically; Docker's own");
+    println!("  scheduler handles that. This flag only controls event reporting.");
     Ok(())
 }
 
 pub async fn run_disable(_client: &DockerClient) -> anyhow::Result<()> {
-    let manager = FailoverManager::new();
-    manager.set_enabled(false);
-    println!("Failover monitoring disabled.");
-    println!("  Automatic failover and data migration will not occur.");
+    save_enabled(false)?;
+    println!("Failover event monitoring disabled.");
     Ok(())
 }
 
 pub async fn run_migrate(
-    client: &DockerClient,
+    _client: &DockerClient,
     volume: String,
     from_node: String,
     to_node: String,
     _output: OutputFormat,
 ) -> anyhow::Result<()> {
-    println!("Migrating volume '{}' from {} to {}...", volume, from_node, to_node);
-
-    let migration = crate::api::migration::migrate_volume(
-        client.inner(),
-        client.inner(),
-        &volume,
-        &from_node,
-        &to_node,
+    // This used to pass the *same* Docker client as both source and target, so no
+    // data ever crossed nodes, and then printed "Migration completed" and exited
+    // 0. The Docker API has no endpoint for copying a volume between nodes: it
+    // would require filesystem access to each node's local daemon. Refuse rather
+    // than claim success.
+    anyhow::bail!(
+        "Cannot migrate volume '{}' from '{}' to '{}': moving volume data between nodes \
+         is not implemented.\n\
+         \n\
+         The Docker Engine API exposes volumes only on the local daemon, so this needs \
+         filesystem access to both nodes (for example over SSH), which swarmctl does \
+         not have.\n\
+         \n\
+         Alternatives: recreate the service with a fresh volume and copy the data \
+         yourself, or use a networked filesystem (NFS, Ceph, EFS) shared by all nodes.",
+        volume,
+        from_node,
+        to_node
     )
-    .await?;
-
-    println!();
-    println!("Migration completed:");
-    println!("  Volume:    {}", migration.volume_name);
-    println!("  From:      {}", migration.source_node);
-    println!("  To:        {}", migration.target_node);
-    println!("  Status:    {:?}", migration.status);
-    println!("  Bytes:     {}", migration.bytes_copied);
-
-    Ok(())
 }

@@ -7,6 +7,10 @@ pub struct ConnectionConfig {
     pub tlscacert: Option<String>,
     pub tlscert: Option<String>,
     pub tlskey: Option<String>,
+    /// Mirrors Docker's `SkipTLSVerify`. Bollard always verifies the server
+    /// certificate and exposes no way to opt out, so this is carried only so we
+    /// can warn instead of silently ignoring it.
+    pub skip_tls_verify: bool,
 }
 
 impl ConnectionConfig {
@@ -36,6 +40,7 @@ impl DockerClient {
     }
 
     pub fn with_config(config: &ConnectionConfig) -> anyhow::Result<Self> {
+        Self::preflight(config)?;
         let docker = Self::connect(config)?;
         Ok(Self { docker })
     }
@@ -51,7 +56,17 @@ impl DockerClient {
             return Ok(ctx.to_connection_config());
         }
 
-        if let Some(host) = env::var("DOCKER_HOST").ok() {
+        // Match Docker's own precedence: an explicitly selected context wins
+        // over DOCKER_HOST. Previously DOCKER_HOST was checked first, so with
+        // both set swarmctl could talk to a different daemon than `docker`.
+        if let Ok(name) = env::var("DOCKER_CONTEXT")
+            && !name.is_empty()
+        {
+            log::info!("Using Docker context from DOCKER_CONTEXT: {}", name);
+            return Ok(crate::api::context::get_context(&name)?.to_connection_config());
+        }
+
+        if let Ok(host) = env::var("DOCKER_HOST") {
             return Ok(ConnectionConfig {
                 host: Some(host),
                 ..Default::default()
@@ -66,6 +81,35 @@ impl DockerClient {
         Ok(ConnectionConfig::default())
     }
 
+    /// Reject endpoints we cannot honour, instead of silently degrading.
+    fn preflight(config: &ConnectionConfig) -> anyhow::Result<()> {
+        if config.skip_tls_verify {
+            anyhow::bail!(
+                "This endpoint requests SkipTLSVerify, but swarmctl always verifies the \
+                 server certificate. Use `ssh://` or provide a CA certificate via \
+                 --tlscacert."
+            );
+        }
+        if config.has_tls() {
+            let missing: Vec<&str> = [
+                ("--tlscacert", config.tlscacert.is_none()),
+                ("--tlscert", config.tlscert.is_none()),
+                ("--tlskey", config.tlskey.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(flag, is_missing)| is_missing.then_some(flag))
+            .collect();
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "Incomplete TLS configuration: {} not specified. Docker requires the CA, \
+                     client certificate and client key together.",
+                    missing.join(", ")
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn connect(config: &ConnectionConfig) -> Result<Docker, bollard::errors::Error> {
         if let Some(host) = &config.host {
             let host = host.trim();
@@ -76,26 +120,11 @@ impl DockerClient {
                 return Docker::connect_with_unix(host, 120, API_DEFAULT_VERSION);
             }
             if config.has_tls() {
-                return Docker::connect_with_ssl(
-                    host,
-                    config
-                        .tlscacert
-                        .as_deref()
-                        .map(Path::new)
-                        .unwrap_or_else(|| Path::new("")),
-                    config
-                        .tlscert
-                        .as_deref()
-                        .map(Path::new)
-                        .unwrap_or_else(|| Path::new("")),
-                    config
-                        .tlskey
-                        .as_deref()
-                        .map(Path::new)
-                        .unwrap_or_else(|| Path::new("")),
-                    120,
-                    API_DEFAULT_VERSION,
-                );
+                // preflight() has already rejected partial TLS configuration.
+                let ca = Path::new(config.tlscacert.as_deref().unwrap_or_default());
+                let cert = Path::new(config.tlscert.as_deref().unwrap_or_default());
+                let key = Path::new(config.tlskey.as_deref().unwrap_or_default());
+                return Docker::connect_with_ssl(host, key, cert, ca, 120, API_DEFAULT_VERSION);
             }
             return Docker::connect_with_http(host, 120, API_DEFAULT_VERSION);
         }
@@ -103,8 +132,9 @@ impl DockerClient {
         // Auto-detect TLS from Docker environment variables
         if env::var("DOCKER_TLS_VERIFY").as_deref() == Ok("1") {
             let cert_path = env::var("DOCKER_CERT_PATH").unwrap_or_else(|_| {
-                let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-                format!("{}/.docker", home)
+                crate::api::docker_check::docker_config_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| ".docker".to_string())
             });
             let host =
                 env::var("DOCKER_HOST").unwrap_or_else(|_| "tcp://127.0.0.1:2376".to_string());

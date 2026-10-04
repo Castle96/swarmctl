@@ -79,19 +79,26 @@ pub async fn run_discovery_tui(
         TuiChoice::JoinHost(idx) => {
             let mut selected = state.hosts[idx].clone();
 
-            println!("Connecting to manager at {} to retrieve join tokens...", selected.ip);
+            println!(
+                "Connecting to manager at {} to retrieve join tokens...",
+                selected.ip
+            );
 
             if selected.join_token_worker.is_none() {
                 discovery::probe_host_for_tokens(&mut selected).await?;
             }
 
-            let worker_token = selected.join_token_worker.as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Failed to retrieve join token from {}", selected.ip))?;
+            let worker_token = selected.join_token_worker.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("Failed to retrieve join token from {}", selected.ip)
+            })?;
             let manager_token = selected.join_token_manager.as_deref();
 
             println!();
             println!("Join tokens retrieved:");
-            println!("  Worker token:  {}...", &worker_token[..24.min(worker_token.len())]);
+            println!(
+                "  Worker token:  {}...",
+                &worker_token[..24.min(worker_token.len())]
+            );
             if let Some(mt) = manager_token {
                 println!("  Manager token: {}...", &mt[..24.min(mt.len())]);
             }
@@ -104,16 +111,18 @@ pub async fn run_discovery_tui(
             }
 
             let role_choice = read_role_choice()?;
-            let token = if role_choice == 2 && manager_token.is_some() {
-                manager_token.unwrap()
-            } else {
-                worker_token
+            let token = match (role_choice, manager_token) {
+                (2, Some(token)) => token,
+                _ => worker_token,
             };
 
             let advertise_addr = discovery::detect_local_ip()?.to_string();
             println!();
-            println!("Joining swarm at {} (manager: {})...", selected.ip,
-                selected.swarm_name.as_deref().unwrap_or("unnamed"));
+            println!(
+                "Joining swarm at {} (manager: {})...",
+                selected.ip,
+                selected.swarm_name.as_deref().unwrap_or("unnamed")
+            );
 
             crate::api::swarm::join_swarm(
                 client.inner(),
@@ -139,30 +148,29 @@ async fn maybe_save_to_vault(
 ) -> Result<(), anyhow::Error> {
     if let Ok(vault_password) =
         rpassword::prompt_password("Vault password (to save tokens, or empty to skip): ")
+        && !vault_password.is_empty()
     {
-        if !vault_password.is_empty() {
-            let vault = if crate::vault::LocalVault::exists() {
-                crate::vault::LocalVault::open(&vault_password)?
-            } else {
-                crate::vault::LocalVault::create(&vault_password)?
-            };
-            let mut vault = vault;
-            let host = std::env::var("DOCKER_HOST")
-                .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
-            let swarm_name = client
-                .inner()
-                .info()
-                .await
-                .ok()
-                .and_then(|i| i.name)
-                .unwrap_or_else(|| "docker".to_string());
-            let tokens = crate::vault::models::JoinTokens {
-                worker: worker_token.to_string(),
-                manager: manager_token.unwrap_or_default().to_string(),
-            };
-            vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
-            println!("Tokens saved to vault.");
-        }
+        let vault = if crate::vault::LocalVault::exists() {
+            crate::vault::LocalVault::open(&vault_password)?
+        } else {
+            crate::vault::LocalVault::create(&vault_password)?
+        };
+        let mut vault = vault;
+        let host = std::env::var("DOCKER_HOST")
+            .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
+        let swarm_name = client
+            .inner()
+            .info()
+            .await
+            .ok()
+            .and_then(|i| i.name)
+            .unwrap_or_else(|| "docker".to_string());
+        let tokens = crate::vault::models::JoinTokens {
+            worker: worker_token.to_string(),
+            manager: manager_token.unwrap_or_default().to_string(),
+        };
+        vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
+        println!("Tokens saved to vault.");
     }
     Ok(())
 }
@@ -174,8 +182,20 @@ fn read_role_choice() -> Result<usize, anyhow::Error> {
     print!("> ");
     stdout.flush()?;
     let mut line = String::new();
-    stdin.lock().read_line(&mut line)?;
-    Ok(line.trim().parse::<usize>().unwrap_or(1))
+    if stdin.lock().read_line(&mut line)? == 0 {
+        anyhow::bail!("No input available for role selection");
+    }
+    // Previously an unparseable answer defaulted to 1 (worker), silently choosing a
+    // join role during a cluster-membership decision.
+    let answer = line.trim();
+    match answer {
+        "" | "1" => Ok(1),
+        "2" => Ok(2),
+        other => anyhow::bail!(
+            "Invalid role '{}'. Expected 1 (worker) or 2 (manager).",
+            other
+        ),
+    }
 }
 
 struct TuiState {
@@ -225,65 +245,62 @@ fn run_tui_app(
     loop {
         terminal.draw(|f| ui(f, state))?;
 
-        if event::poll(poll_interval)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            return Ok(TuiChoice::Cancelled);
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            state.move_down();
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            state.move_up();
-                        }
-                        KeyCode::Enter | KeyCode::Char('d') => {
-                            if state.create_new_selected {
-                                return Ok(TuiChoice::CreateNew);
-                            } else {
-                                return Ok(TuiChoice::JoinHost(state.selected_index));
-                            }
-                        }
-                        KeyCode::Char('1') => {
-                            if state.hosts.len() >= 1 {
-                                state.create_new_selected = false;
-                                state.selected_index = 0;
-                            }
-                        }
-                        KeyCode::Char('2') => {
-                            if state.hosts.len() >= 2 {
-                                state.create_new_selected = false;
-                                state.selected_index = 1;
-                            }
-                        }
-                        KeyCode::Char('3') => {
-                            if state.hosts.len() >= 3 {
-                                state.create_new_selected = false;
-                                state.selected_index = 2;
-                            }
-                        }
-                        KeyCode::Char('4') => {
-                            if state.hosts.len() >= 4 {
-                                state.create_new_selected = false;
-                                state.selected_index = 3;
-                            }
-                        }
-                        KeyCode::Char('5') => {
-                            if state.hosts.len() >= 5 {
-                                state.create_new_selected = false;
-                                state.selected_index = 4;
-                            }
-                        }
-                        KeyCode::Char('6') => {
-                            if state.hosts.len() >= 6 {
-                                state.create_new_selected = false;
-                                state.selected_index = 5;
-                            }
-                        }
-                        _ => {}
+        if event::poll(poll_interval)?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    return Ok(TuiChoice::Cancelled);
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    state.move_down();
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    state.move_up();
+                }
+                KeyCode::Enter | KeyCode::Char('d') => {
+                    if state.create_new_selected {
+                        return Ok(TuiChoice::CreateNew);
+                    } else {
+                        return Ok(TuiChoice::JoinHost(state.selected_index));
                     }
                 }
+                KeyCode::Char('1') => {
+                    if !state.hosts.is_empty() {
+                        state.create_new_selected = false;
+                        state.selected_index = 0;
+                    }
+                }
+                KeyCode::Char('2') => {
+                    if state.hosts.len() >= 2 {
+                        state.create_new_selected = false;
+                        state.selected_index = 1;
+                    }
+                }
+                KeyCode::Char('3') => {
+                    if state.hosts.len() >= 3 {
+                        state.create_new_selected = false;
+                        state.selected_index = 2;
+                    }
+                }
+                KeyCode::Char('4') => {
+                    if state.hosts.len() >= 4 {
+                        state.create_new_selected = false;
+                        state.selected_index = 3;
+                    }
+                }
+                KeyCode::Char('5') => {
+                    if state.hosts.len() >= 5 {
+                        state.create_new_selected = false;
+                        state.selected_index = 4;
+                    }
+                }
+                KeyCode::Char('6') if state.hosts.len() >= 6 => {
+                    state.create_new_selected = false;
+                    state.selected_index = 5;
+                }
+                _ => {}
             }
         }
     }
@@ -334,11 +351,7 @@ fn render_header(f: &mut ratatui::Frame, _state: &TuiState, area: Rect) {
             Style::default().fg(COLOR_DIM),
         ),
     ]))
-    .style(
-        Style::default()
-            .bg(COLOR_HEADER_BG)
-            .fg(Color::White),
-    );
+    .style(Style::default().bg(COLOR_HEADER_BG).fg(Color::White));
     f.render_widget(header, area);
 }
 
@@ -422,10 +435,7 @@ fn render_host_list(f: &mut ratatui::Frame, state: &TuiState, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(COLOR_DIM))
-                .title(format!(
-                    " Discovered Hosts ({}) ",
-                    state.hosts.len()
-                ))
+                .title(format!(" Discovered Hosts ({}) ", state.hosts.len()))
                 .title_style(
                     Style::default()
                         .fg(COLOR_PRIMARY)
@@ -559,13 +569,33 @@ fn render_host_detail(f: &mut ratatui::Frame, state: &TuiState, area: Rect) {
 
 fn render_footer(f: &mut ratatui::Frame, _state: &TuiState, area: Rect) {
     let footer = Line::from(vec![
-        Span::styled(" j/k", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " j/k",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" or ", Style::default().fg(COLOR_DIM)),
-        Span::styled("↑/↓", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "↑/↓",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" navigate  ", Style::default().fg(COLOR_DIM)),
-        Span::styled("Enter", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Enter",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" select  ", Style::default().fg(COLOR_DIM)),
-        Span::styled("q", Style::default().fg(COLOR_PRIMARY).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "q",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" cancel", Style::default().fg(COLOR_DIM)),
     ]);
 
@@ -581,9 +611,7 @@ fn detail_line(key: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("  {:16}", key),
-            Style::default()
-                .fg(COLOR_DIM)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(COLOR_DIM).add_modifier(Modifier::BOLD),
         ),
         Span::styled(value.to_string(), Style::default().fg(Color::White)),
     ])

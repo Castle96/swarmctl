@@ -15,7 +15,10 @@ pub async fn run() -> anyhow::Result<()> {
     ];
 
     for (name, short, version, namespaced) in resources {
-        println!("{:<20} {:<15} {:<30} {:<20}", name, short, version, namespaced);
+        println!(
+            "{:<20} {:<15} {:<30} {:<20}",
+            name, short, version, namespaced
+        );
     }
 
     println!();

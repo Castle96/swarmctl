@@ -2,7 +2,7 @@ pub mod crypto;
 pub mod models;
 
 use anyhow::{Context, Result};
-use models::{JoinTokens, VaultData, VaultFile, VAULT_DIR, VAULT_FILE, VAULT_VERSION};
+use models::{JoinTokens, VAULT_VERSION, VaultData, VaultFile};
 use std::fs;
 use std::path::PathBuf;
 use zeroize::Zeroize;
@@ -14,13 +14,8 @@ pub struct LocalVault {
 }
 
 impl LocalVault {
-    fn vault_dir() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-        PathBuf::from(home).join(VAULT_DIR)
-    }
-
     fn vault_path() -> PathBuf {
-        Self::vault_dir().join(VAULT_FILE)
+        crate::utils::paths::vault_file()
     }
 
     pub fn exists() -> bool {
@@ -33,8 +28,7 @@ impl LocalVault {
             ..Default::default()
         };
 
-        let plaintext = serde_json::to_vec(&data)
-            .context("Failed to serialize vault data")?;
+        let plaintext = serde_json::to_vec(&data).context("Failed to serialize vault data")?;
 
         let (salt, nonce, ciphertext) = crypto::encrypt(&plaintext, password)?;
 
@@ -45,13 +39,12 @@ impl LocalVault {
             ciphertext,
         };
 
-        let dir = Self::vault_dir();
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create {}", dir.display()))?;
+        crate::utils::paths::ensure_swarmctl_dir()
+            .with_context(|| "Failed to create swarmctl state directory")?;
 
         let json = serde_json::to_string_pretty(&vault_file)?;
-        fs::write(Self::vault_path(), json)
-            .context("Failed to write vault file")?;
+        crate::utils::paths::write_private(&Self::vault_path(), json.as_bytes())
+            .with_context(|| format!("Failed to write {}", Self::vault_path().display()))?;
 
         Ok(Self {
             path: Self::vault_path(),
@@ -63,15 +56,22 @@ impl LocalVault {
     pub fn open(password: &str) -> Result<Self> {
         let path = Self::vault_path();
         if !path.exists() {
-            anyhow::bail!("Vault not found at {}. Run `swarmctl vault init` first.", path.display());
+            anyhow::bail!(
+                "Vault not found at {}. Run `swarmctl vault init` first.",
+                path.display()
+            );
         }
 
-        let raw = fs::read_to_string(&path)
-            .context("Failed to read vault file")?;
-        let vault_file: VaultFile = serde_json::from_str(&raw)
-            .context("Failed to parse vault file")?;
+        let raw = fs::read_to_string(&path).context("Failed to read vault file")?;
+        let vault_file: VaultFile =
+            serde_json::from_str(&raw).context("Failed to parse vault file")?;
 
-        let plaintext = crypto::decrypt(&vault_file.salt, &vault_file.nonce, &vault_file.ciphertext, password)?;
+        let plaintext = crypto::decrypt(
+            &vault_file.salt,
+            &vault_file.nonce,
+            &vault_file.ciphertext,
+            password,
+        )?;
 
         let data: VaultData = serde_json::from_slice(&plaintext)
             .context("Failed to decrypt vault — wrong password?")?;
@@ -86,8 +86,7 @@ impl LocalVault {
     pub fn save(&self) -> Result<()> {
         let data = self.data.as_ref().context("No vault data")?;
 
-        let plaintext = serde_json::to_vec(data)
-            .context("Failed to serialize vault data")?;
+        let plaintext = serde_json::to_vec(data).context("Failed to serialize vault data")?;
 
         let (salt, nonce, ciphertext) = crypto::encrypt(&plaintext, &self.password)?;
 
@@ -99,8 +98,8 @@ impl LocalVault {
         };
 
         let json = serde_json::to_string_pretty(&vault_file)?;
-        fs::write(&self.path, json)
-            .context("Failed to write vault file")?;
+        crate::utils::paths::write_private(&self.path, json.as_bytes())
+            .with_context(|| format!("Failed to write {}", self.path.display()))?;
 
         Ok(())
     }
@@ -109,7 +108,13 @@ impl LocalVault {
         self.data.as_ref()
     }
 
-    pub fn store_swarm_tokens(&mut self, tokens: JoinTokens, unlock_key: Option<String>, docker_host: &str, swarm_name: &str) -> Result<()> {
+    pub fn store_swarm_tokens(
+        &mut self,
+        tokens: JoinTokens,
+        unlock_key: Option<String>,
+        docker_host: &str,
+        swarm_name: &str,
+    ) -> Result<()> {
         if let Some(ref mut data) = self.data {
             data.join_tokens = tokens;
             data.unlock_key = unlock_key;

@@ -13,7 +13,6 @@ pub async fn run(
     replicas: u64,
     env: Vec<String>,
     labels: Vec<String>,
-    _network: Option<String>,
     publish: Vec<String>,
 ) -> anyhow::Result<()> {
     let env_vars = if env.is_empty() { vec![] } else { env };

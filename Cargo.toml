@@ -2,6 +2,12 @@
 name = "swarmctl"
 version = "0.1.0"
 edition = "2024"
+description = "A kubectl-inspired CLI and TUI dashboard for managing Docker Swarm clusters"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Castle96/swarmctl"
+keywords = ["docker", "swarm", "cli", "tui", "devops"]
+categories = ["command-line-utilities"]
 
 [features]
 default = ["tui"]

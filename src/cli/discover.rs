@@ -7,26 +7,26 @@ pub async fn run_scan(
     subnet: Option<String>,
     json_output: bool,
 ) -> Result<()> {
-    println!("Scanning network for Docker hosts...");
+    // Progress messages go to stderr so `--json` output is pipeable into jq.
+    eprintln!("Scanning network for Docker hosts...");
 
     let hosts = discovery::scan_subnet(subnet.as_deref()).await?;
 
     if hosts.is_empty() {
-        println!("No Docker hosts found on the network.");
+        if json_output {
+            println!("[]");
+        } else {
+            println!("No Docker hosts found on the network.");
+        }
         return Ok(());
     }
-
-    println!("Found {} Docker host(s):\n", hosts.len());
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&hosts)?);
     } else {
+        println!("Found {} Docker host(s):\n", hosts.len());
         for (i, host) in hosts.iter().enumerate() {
-            let swarm_badge = if host.swarm_active {
-                " [SWARM]"
-            } else {
-                ""
-            };
+            let swarm_badge = if host.swarm_active { " [SWARM]" } else { "" };
             let role_badge = if host.is_manager {
                 " (manager)"
             } else if host.swarm_active {
@@ -55,7 +55,8 @@ pub async fn run_scan(
                     .as_deref()
                     .map(|v| format!("Docker {}", v))
                     .unwrap_or_else(|| "Docker version unknown".to_string())
-                    .to_string() + role_badge,
+                    .to_string()
+                    + role_badge,
             );
 
             if host.swarm_active {
@@ -102,10 +103,7 @@ pub async fn run_interactive(client: &DockerClient, subnet: Option<String>) -> R
         } else {
             "standalone"
         };
-        let name = host
-            .hostname
-            .as_deref()
-            .unwrap_or(&host.ip);
+        let name = host.hostname.as_deref().unwrap_or(&host.ip);
 
         println!(
             "  [{}] {} ({}){} - {}",
@@ -131,7 +129,10 @@ pub async fn run_interactive(client: &DockerClient, subnet: Option<String>) -> R
     println!();
     println!("Enter choice (1-{} or 0 to create new): ", hosts.len());
 
-    let choice = read_choice()?;
+    let Some(choice) = read_choice()? else {
+        println!("Cancelled.");
+        return Ok(());
+    };
     if choice == 0 {
         return run_create_new(client).await;
     }
@@ -148,12 +149,7 @@ pub async fn run_interactive(client: &DockerClient, subnet: Option<String>) -> R
             "Host {} is not part of a swarm. Choose a host marked with * (swarm active).",
             selected.ip
         );
-        println!("Would you like to create a new swarm on this node instead? [y/N] ");
-        use std::io::Write;
-        std::io::stdout().flush()?;
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if input.trim().eq_ignore_ascii_case("y") {
+        if read_confirm("Would you like to create a new swarm on this node instead?")? {
             return run_create_new(client).await;
         }
         anyhow::bail!("Cannot join: target host has no active swarm.");
@@ -170,16 +166,18 @@ pub async fn run_interactive(client: &DockerClient, subnet: Option<String>) -> R
         discovery::probe_host_for_tokens(&mut selected_host).await?;
     }
 
-    let worker_token = selected_host
-        .join_token_worker
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Failed to retrieve join token from {}", selected_host.ip))?;
+    let worker_token = selected_host.join_token_worker.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("Failed to retrieve join token from {}", selected_host.ip)
+    })?;
 
     let manager_token = selected_host.join_token_manager.as_deref();
 
     println!();
     println!("Join tokens retrieved from {}: ", selected_host.ip);
-    println!("  Worker token:  {}...", &worker_token[..24.min(worker_token.len())]);
+    println!(
+        "  Worker token:  {}...",
+        &worker_token[..24.min(worker_token.len())]
+    );
     if let Some(mt) = manager_token {
         println!("  Manager token: {}...", &mt[..24.min(mt.len())]);
     }
@@ -197,12 +195,18 @@ pub async fn run_interactive(client: &DockerClient, subnet: Option<String>) -> R
 
     let mut role_input = String::new();
     std::io::stdin().read_line(&mut role_input)?;
-    let role_choice: u32 = role_input.trim().parse().unwrap_or(1);
+    let role_choice: u32 = match role_input.trim() {
+        "" | "1" => 1,
+        "2" => 2,
+        other => anyhow::bail!(
+            "Invalid role '{}'. Expected 1 (worker) or 2 (manager).",
+            other
+        ),
+    };
 
-    let token = if role_choice == 2 && manager_token.is_some() {
-        manager_token.unwrap()
-    } else {
-        worker_token
+    let token = match (role_choice, manager_token) {
+        (2, Some(token)) => token,
+        _ => worker_token,
     };
 
     println!();
@@ -228,31 +232,32 @@ pub async fn run_interactive(client: &DockerClient, subnet: Option<String>) -> R
     println!();
     println!("Successfully joined the swarm!");
 
-    if let Ok(vault_password) = rpassword::prompt_password("Vault password (to save tokens, or empty to skip): ") {
-        if !vault_password.is_empty() {
-            let vault = if crate::vault::LocalVault::exists() {
-                crate::vault::LocalVault::open(&vault_password)?
-            } else {
-                crate::vault::LocalVault::create(&vault_password)?
-            };
-            let mut vault = vault;
-            let host = std::env::var("DOCKER_HOST")
-                .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
-            let swarm_name = client
-                .inner()
-                .info()
-                .await
-                .ok()
-                .and_then(|i| i.name)
-                .unwrap_or_else(|| "docker".to_string());
+    if let Ok(vault_password) =
+        rpassword::prompt_password("Vault password (to save tokens, or empty to skip): ")
+        && !vault_password.is_empty()
+    {
+        let vault = if crate::vault::LocalVault::exists() {
+            crate::vault::LocalVault::open(&vault_password)?
+        } else {
+            crate::vault::LocalVault::create(&vault_password)?
+        };
+        let mut vault = vault;
+        let host = std::env::var("DOCKER_HOST")
+            .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
+        let swarm_name = client
+            .inner()
+            .info()
+            .await
+            .ok()
+            .and_then(|i| i.name)
+            .unwrap_or_else(|| "docker".to_string());
 
-            let tokens = crate::vault::models::JoinTokens {
-                worker: worker_token.to_string(),
-                manager: manager_token.unwrap_or_default().to_string(),
-            };
-            vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
-            println!("Tokens saved to vault.");
-        }
+        let tokens = crate::vault::models::JoinTokens {
+            worker: worker_token.to_string(),
+            manager: manager_token.unwrap_or_default().to_string(),
+        };
+        vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
+        println!("Tokens saved to vault.");
     }
 
     Ok(())
@@ -289,43 +294,67 @@ async fn run_create_new(client: &DockerClient) -> Result<()> {
 
     if let Ok(vault_password) =
         rpassword::prompt_password("Vault password (to save tokens, or empty to skip): ")
+        && !vault_password.is_empty()
     {
-        if !vault_password.is_empty() {
-            let vault = if crate::vault::LocalVault::exists() {
-                crate::vault::LocalVault::open(&vault_password)?
-            } else {
-                crate::vault::LocalVault::create(&vault_password)?
-            };
-            let mut vault = vault;
-            let host = std::env::var("DOCKER_HOST")
-                .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
-            let swarm_name = client
-                .inner()
-                .info()
-                .await
-                .ok()
-                .and_then(|i| i.name)
-                .unwrap_or_else(|| "docker".to_string());
-            vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
-            println!("Tokens saved to vault.");
-        }
+        let vault = if crate::vault::LocalVault::exists() {
+            crate::vault::LocalVault::open(&vault_password)?
+        } else {
+            crate::vault::LocalVault::create(&vault_password)?
+        };
+        let mut vault = vault;
+        let host = std::env::var("DOCKER_HOST")
+            .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
+        let swarm_name = client
+            .inner()
+            .info()
+            .await
+            .ok()
+            .and_then(|i| i.name)
+            .unwrap_or_else(|| "docker".to_string());
+        vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
+        println!("Tokens saved to vault.");
     }
 
     Ok(())
 }
 
-fn read_choice() -> Result<usize> {
+/// Read a menu selection.
+///
+/// Returns `None` on empty input or EOF. Callers must treat that as "cancel"
+/// rather than as a selection: option `0` creates a swarm, and pressing Enter at
+/// the prompt used to do exactly that.
+fn read_choice() -> Result<Option<usize>> {
     use std::io::{self, BufRead, Write};
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     print!("> ");
     stdout.flush()?;
     let mut line = String::new();
-    stdin.lock().read_line(&mut line)?;
+    let read = stdin.lock().read_line(&mut line)?;
+    if read == 0 {
+        // EOF (e.g. piped input): treat as cancel.
+        return Ok(None);
+    }
     let line = line.trim();
     if line.is_empty() {
-        return Ok(0);
+        return Ok(None);
     }
     line.parse::<usize>()
+        .map(Some)
         .map_err(|_| anyhow::anyhow!("Invalid input: {}", line))
+}
+
+/// Read a yes/no answer, defaulting to no.
+fn read_confirm(prompt: &str) -> Result<bool> {
+    use std::io::{self, BufRead, Write};
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    print!("{} [y/N] ", prompt);
+    stdout.flush()?;
+    let mut line = String::new();
+    if stdin.lock().read_line(&mut line)? == 0 {
+        return Ok(false);
+    }
+    let answer = line.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
 }

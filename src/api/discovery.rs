@@ -109,17 +109,15 @@ async fn probe_docker_host(ip: &str, docker_port: u16) -> Option<DiscoveredHost>
         _ => return None,
     };
 
-    let info = match tokio::time::timeout(Duration::from_millis(PROBE_TIMEOUT_MS), docker.info())
-        .await
-    {
-        Ok(Ok(info)) => info,
-        _ => return None,
-    };
+    let info =
+        match tokio::time::timeout(Duration::from_millis(PROBE_TIMEOUT_MS), docker.info()).await {
+            Ok(Ok(info)) => info,
+            _ => return None,
+        };
 
-    let docker_version = info
-        .kernel_version
-        .clone()
-        .or_else(|| info.server_version.clone());
+    // `kernel_version` is the host kernel string, not the Docker version; using it
+    // first made discovery report things like "Docker 6.8.0-102-generic".
+    let docker_version = info.server_version.clone();
 
     let hostname = info.name.clone();
 
@@ -131,7 +129,8 @@ async fn probe_docker_host(ip: &str, docker_port: u16) -> Option<DiscoveredHost>
                 .map(|state| {
                     !matches!(
                         state,
-                        bollard::models::LocalNodeState::EMPTY | bollard::models::LocalNodeState::INACTIVE
+                        bollard::models::LocalNodeState::EMPTY
+                            | bollard::models::LocalNodeState::INACTIVE
                     )
                 })
                 .unwrap_or(false)
@@ -216,37 +215,40 @@ pub async fn probe_host_for_tokens(host: &mut DiscoveredHost) -> Result<()> {
     Ok(())
 }
 
+/// Expand a CIDR block into the set of usable host addresses.
+///
+/// Returns every address strictly between the network and broadcast addresses,
+/// so a `/24` yields 254 entries. The prefix length is bounded to `/16`-`/30` to
+/// keep scans bounded (at most 65k probes).
+pub fn expand_cidr(cidr: &str) -> Result<Vec<Ipv4Addr>> {
+    let parts: Vec<&str> = cidr.split('/').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid CIDR format. Expected something like 192.168.1.0/24");
+    }
+    let base: Ipv4Addr = parts[0].parse().context("Invalid base IP address")?;
+    let prefix_len: u8 = parts[1].parse().context("Invalid prefix length")?;
+
+    if !(16..=30).contains(&prefix_len) {
+        anyhow::bail!("Prefix length must be between 16 and 30");
+    }
+
+    let mask = !((1u32 << (32 - prefix_len)) - 1);
+    let base_u32 = u32::from_be_bytes(base.octets());
+    let network = base_u32 & mask;
+    let broadcast = network | !mask;
+
+    let mut result = Vec::new();
+    let mut current = network + 1;
+    while current < broadcast {
+        result.push(Ipv4Addr::from(current.to_be_bytes()));
+        current += 1;
+    }
+    Ok(result)
+}
+
 pub async fn scan_subnet(subnet: Option<&str>) -> Result<Vec<DiscoveredHost>> {
     let hosts = match subnet {
-        Some(cidr) => {
-            let parts: Vec<&str> = cidr.split('/').collect();
-            if parts.len() != 2 {
-                anyhow::bail!("Invalid CIDR format. Expected something like 192.168.1.0/24");
-            }
-            let base: Ipv4Addr = parts[0]
-                .parse()
-                .context("Invalid base IP address")?;
-            let prefix_len: u8 = parts[1]
-                .parse()
-                .context("Invalid prefix length")?;
-
-            if prefix_len < 16 || prefix_len > 30 {
-                anyhow::bail!("Prefix length must be between 16 and 30");
-            }
-
-            let mask = !((1u32 << (32 - prefix_len)) - 1);
-            let base_u32 = u32::from_be_bytes(base.octets());
-            let network = base_u32 & mask;
-            let broadcast = network | !mask;
-
-            let mut result = Vec::new();
-            let mut current = network + 1;
-            while current < broadcast {
-                result.push(Ipv4Addr::from(current.to_be_bytes()));
-                current += 1;
-            }
-            result
-        }
+        Some(cidr) => expand_cidr(cidr)?,
         None => detect_local_subnet()?,
     };
 
@@ -284,51 +286,50 @@ pub async fn scan_subnet(subnet: Option<&str>) -> Result<Vec<DiscoveredHost>> {
                 })
                 .await;
 
-                if let Ok(Ok(docker)) = docker_result {
-                    if let Ok(info) = docker.info().await {
-                        host.docker_version = info.server_version.clone();
-                        host.hostname = info.name.clone();
-                        let swarm_active = info
-                            .swarm
-                            .as_ref()
-                            .and_then(|s| {
-                                s.local_node_state.as_ref().map(|state| {
-                                    !matches!(
-                                        state,
-                                        bollard::models::LocalNodeState::EMPTY
-                                            | bollard::models::LocalNodeState::INACTIVE
-                                    )
-                                })
+                if let Ok(Ok(docker)) = docker_result
+                    && let Ok(info) = docker.info().await
+                {
+                    host.docker_version = info.server_version.clone();
+                    host.hostname = info.name.clone();
+                    let swarm_active = info
+                        .swarm
+                        .as_ref()
+                        .and_then(|s| {
+                            s.local_node_state.as_ref().map(|state| {
+                                !matches!(
+                                    state,
+                                    bollard::models::LocalNodeState::EMPTY
+                                        | bollard::models::LocalNodeState::INACTIVE
+                                )
                             })
-                            .unwrap_or(false);
-                        host.swarm_active = swarm_active;
+                        })
+                        .unwrap_or(false);
+                    host.swarm_active = swarm_active;
 
-                        if swarm_active {
-                            if let Ok(swarm) = docker.inspect_swarm().await {
-                                host.swarm_id = swarm.id.clone();
-                                host.swarm_name =
-                                    swarm.spec.as_ref().and_then(|s| s.name.clone());
-                            }
-        if let Ok(nodes) = node::list_nodes(&docker).await {
-                                host.node_count = Some(nodes.len() as u64);
-                                host.manager_count = Some(
-                                    nodes
-                                        .iter()
-                                        .filter(|n| {
-                                            n.spec
-                                                .as_ref()
-                                                .and_then(|s| s.role)
-                                                .map(|r| {
-                                                    r == bollard::models::NodeSpecRoleEnum::MANAGER
-                                                })
-                                                .unwrap_or(false)
-                                        })
-                                        .count() as u64,
-                                );
-                            }
+                    if swarm_active {
+                        if let Ok(swarm) = docker.inspect_swarm().await {
+                            host.swarm_id = swarm.id.clone();
+                            host.swarm_name = swarm.spec.as_ref().and_then(|s| s.name.clone());
                         }
-                        result = Some(host);
+                        if let Ok(nodes) = node::list_nodes(&docker).await {
+                            host.node_count = Some(nodes.len() as u64);
+                            host.manager_count = Some(
+                                nodes
+                                    .iter()
+                                    .filter(|n| {
+                                        n.spec
+                                            .as_ref()
+                                            .and_then(|s| s.role)
+                                            .map(|r| {
+                                                r == bollard::models::NodeSpecRoleEnum::MANAGER
+                                            })
+                                            .unwrap_or(false)
+                                    })
+                                    .count() as u64,
+                            );
+                        }
                     }
+                    result = Some(host);
                 }
             }
 
@@ -337,7 +338,7 @@ pub async fn scan_subnet(subnet: Option<&str>) -> Result<Vec<DiscoveredHost>> {
         futures.push(fut);
 
         if futures.len() >= MAX_CONCURRENT_SCANS {
-            let done: Vec<_> = futures.drain(..).collect();
+            let done: Vec<_> = std::mem::take(&mut futures);
             for f in done {
                 if let Ok(Some(host)) = f.await {
                     discovered.push(host);
@@ -353,12 +354,79 @@ pub async fn scan_subnet(subnet: Option<&str>) -> Result<Vec<DiscoveredHost>> {
     }
 
     discovered.sort_by(|a, b| {
-        let a_score = if a.swarm_active { 2 } else if a.docker_port.is_some() { 1 } else { 0 };
-        let b_score = if b.swarm_active { 2 } else if b.docker_port.is_some() { 1 } else { 0 };
+        let a_score = if a.swarm_active {
+            2
+        } else if a.docker_port.is_some() {
+            1
+        } else {
+            0
+        };
+        let b_score = if b.swarm_active {
+            2
+        } else if b.docker_port.is_some() {
+            1
+        } else {
+            0
+        };
         b_score.cmp(&a_score).then_with(|| a.ip.cmp(&b.ip))
     });
 
-    log::info!("Scan complete: {}/{} hosts responded", discovered.len(), total);
+    log::info!(
+        "Scan complete: {}/{} hosts responded",
+        discovered.len(),
+        total
+    );
 
     Ok(discovered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_cidr;
+
+    #[test]
+    fn expands_slash_24_excluding_network_and_broadcast() {
+        let hosts = expand_cidr("192.168.1.0/24").unwrap();
+        assert_eq!(hosts.len(), 254);
+        assert_eq!(hosts[0].to_string(), "192.168.1.1");
+        assert_eq!(hosts[253].to_string(), "192.168.1.254");
+    }
+
+    #[test]
+    fn normalizes_non_network_base_addresses() {
+        // 192.168.1.77/24 should still yield the whole usable range.
+        let hosts = expand_cidr("192.168.1.77/24").unwrap();
+        assert_eq!(hosts.len(), 254);
+        assert_eq!(hosts[0].to_string(), "192.168.1.1");
+    }
+
+    #[test]
+    fn expands_slash_30() {
+        let hosts = expand_cidr("10.0.0.0/30").unwrap();
+        let addrs: Vec<String> = hosts.iter().map(|h| h.to_string()).collect();
+        assert_eq!(addrs, vec!["10.0.0.1", "10.0.0.2"]);
+    }
+
+    #[test]
+    fn expands_slash_16_to_expected_size() {
+        assert_eq!(expand_cidr("172.16.0.0/16").unwrap().len(), 65534);
+    }
+
+    #[test]
+    fn rejects_out_of_range_prefix_lengths() {
+        // Bounds keep subnet scans from exploding into millions of probes.
+        assert!(expand_cidr("10.0.0.0/8").is_err());
+        assert!(expand_cidr("10.0.0.0/31").is_err());
+        assert!(expand_cidr("10.0.0.0/32").is_err());
+        assert!(expand_cidr("10.0.0.0/16").is_ok());
+        assert!(expand_cidr("10.0.0.0/30").is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_input() {
+        assert!(expand_cidr("192.168.1.0").is_err());
+        assert!(expand_cidr("192.168.1.0/24/8").is_err());
+        assert!(expand_cidr("not-an-ip/24").is_err());
+        assert!(expand_cidr("192.168.1.0/abc").is_err());
+    }
 }

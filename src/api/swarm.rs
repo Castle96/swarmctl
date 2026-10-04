@@ -1,7 +1,7 @@
+use crate::vault::models::JoinTokens;
 use bollard::Docker;
 use bollard::models::{SwarmInitRequest, SwarmJoinRequest};
 use bollard::query_parameters::{LeaveSwarmOptions, UpdateSwarmOptions};
-use crate::vault::models::JoinTokens;
 
 pub async fn get_swarm_info(docker: &Docker) -> anyhow::Result<bollard::models::Swarm> {
     Ok(docker.inspect_swarm().await?)
@@ -38,9 +38,7 @@ pub async fn join_swarm(
 }
 
 pub async fn leave_swarm(docker: &Docker, force: bool) -> anyhow::Result<()> {
-    let options = LeaveSwarmOptions {
-        force,
-    };
+    let options = LeaveSwarmOptions { force };
     docker.leave_swarm(Some(options)).await?;
     Ok(())
 }
@@ -54,38 +52,37 @@ pub async fn get_join_tokens(docker: &Docker) -> anyhow::Result<JoinTokens> {
     })
 }
 
+/// Rotate the cluster's join tokens.
+///
+/// `Spec.JoinTokens` is a read-only field in the Engine API: the daemon derives
+/// tokens from the cluster CA key and ignores whatever a client writes there.
+/// Rotation is requested with `rotate_worker_token` / `rotate_manager_token` on
+/// the update call, and the new values are read back with `inspect_swarm` —
+/// generating them client-side would hand out strings that cannot join.
 pub async fn rotate_join_tokens(docker: &Docker) -> anyhow::Result<JoinTokens> {
-    let mut swarm = docker.inspect_swarm().await?;
+    let swarm = docker.inspect_swarm().await?;
     let version = swarm
         .version
         .context("No swarm version")?
         .index
         .unwrap_or(0);
+    // Pass the spec through unchanged: rotation is requested purely via query
+    // parameters, and the spec must not be altered.
     let spec = swarm.spec.context("No swarm spec")?;
-
-    let new_tokens = crate::vault::models::JoinTokens {
-        worker: generate_token(),
-        manager: generate_token(),
-    };
-
-    let tokens_container = swarm.join_tokens.get_or_insert_with(Default::default);
-    tokens_container.worker = Some(new_tokens.worker.clone());
-    tokens_container.manager = Some(new_tokens.manager.clone());
 
     let options = UpdateSwarmOptions {
         version: version as i64,
+        rotate_worker_token: true,
+        rotate_manager_token: true,
         ..Default::default()
     };
-    docker.update_swarm(spec, options).await?;
+    docker
+        .update_swarm(spec, options)
+        .await
+        .context("Failed to rotate join tokens")?;
 
-    Ok(new_tokens)
-}
-
-fn generate_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..32).map(|_| rng.r#gen()).collect();
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    // Read back the tokens the daemon actually issued.
+    get_join_tokens(docker).await
 }
 
 use anyhow::Context;

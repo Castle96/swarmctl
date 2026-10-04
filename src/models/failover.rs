@@ -55,31 +55,16 @@ pub struct FailoverEventRow {
     pub details: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FailoverState {
+    /// Opt-in. Nothing acts on this flag automatically, so defaulting to true
+    /// made `failover disable` meaningless and `status` misleading.
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub events: Vec<FailoverEvent>,
+    #[serde(default)]
     pub failed_nodes: Vec<String>,
+    #[serde(default)]
     pub migrations_in_progress: Vec<String>,
-}
-
-impl Default for FailoverState {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            events: Vec::new(),
-            failed_nodes: Vec::new(),
-            migrations_in_progress: Vec::new(),
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Tabled, Serialize)]
-pub struct MigrationStatusRow {
-    pub volume: String,
-    pub from_node: String,
-    pub to_node: String,
-    pub status: String,
-    pub progress: String,
 }

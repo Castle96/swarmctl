@@ -7,15 +7,9 @@ pub async fn run_init(client: &DockerClient, advertise_addr: Option<String>) -> 
         println!("Swarm is already active on this node.");
         let info = swarm::get_swarm_info(client.inner()).await?;
         if let Some(spec) = &info.spec {
-            println!(
-                "  Cluster: {}",
-                spec.name.as_deref().unwrap_or("unnamed")
-            );
+            println!("  Cluster: {}", spec.name.as_deref().unwrap_or("unnamed"));
         }
-        println!(
-            "  ID: {}",
-            info.id.as_deref().unwrap_or("unknown")
-        );
+        println!("  ID: {}", info.id.as_deref().unwrap_or("unknown"));
         return Ok(());
     }
 
@@ -34,8 +28,14 @@ pub async fn run_init(client: &DockerClient, advertise_addr: Option<String>) -> 
     println!();
     println!("Swarm initialized successfully.");
     println!();
-    println!("  Worker join token:  {}...", &tokens.worker[..24.min(tokens.worker.len())]);
-    println!("  Manager join token: {}...", &tokens.manager[..24.min(tokens.manager.len())]);
+    println!(
+        "  Worker join token:  {}...",
+        &tokens.worker[..24.min(tokens.worker.len())]
+    );
+    println!(
+        "  Manager join token: {}...",
+        &tokens.manager[..24.min(tokens.manager.len())]
+    );
 
     let vault_password = rpassword::prompt_password("Vault password (to save tokens): ")?;
     if vault_password.is_empty() {
@@ -50,7 +50,8 @@ pub async fn run_init(client: &DockerClient, advertise_addr: Option<String>) -> 
     };
 
     let mut vault = vault;
-    let host = std::env::var("DOCKER_HOST").unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
+    let host =
+        std::env::var("DOCKER_HOST").unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string());
     let swarm_name = info_name(client).await;
     vault.store_swarm_tokens(tokens, None, &host, &swarm_name)?;
 
@@ -171,22 +172,19 @@ pub async fn run_status(client: &DockerClient) -> Result<()> {
             spec.name.as_deref().unwrap_or("unnamed")
         );
     }
-    println!(
-        "  ID:         {}",
-        info.id.as_deref().unwrap_or("unknown")
-    );
+    println!("  ID:         {}", info.id.as_deref().unwrap_or("unknown"));
     println!(
         "  Created:    {}",
         info.created_at
             .as_ref()
-            .map(|d| format!("{}", d))
+            .map(|d| d.to_string())
             .unwrap_or_else(|| "unknown".to_string())
     );
     println!(
         "  Updated:    {}",
         info.updated_at
             .as_ref()
-            .map(|d| format!("{}", d))
+            .map(|d| d.to_string())
             .unwrap_or_else(|| "unknown".to_string())
     );
 

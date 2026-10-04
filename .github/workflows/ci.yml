@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  ci:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+      - name: Build (no default features)
+        run: cargo build --no-default-features
+
+  release:
+    name: release build
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package binary and docs
+        run: |
+          mkdir -p dist
+          cp target/release/swarmctl dist/
+          cp README.md BUILD.md LICENSE dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarmctl-linux-x86_64
+          path: dist/

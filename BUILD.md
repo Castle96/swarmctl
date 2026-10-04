@@ -1,285 +1,252 @@
-# Building and Running swarmctl
+# Building and running swarmctl
 
 ## Prerequisites
 
-### Required Software
+1. **Rust** (stable, 1.85 or newer — the crate uses edition 2024)
 
-1. **Rust** (latest stable)
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    source ~/.cargo/env
    ```
 
-2. **Build Tools**
-   - **Ubuntu/Debian:**
-     ```bash
-     sudo apt update && sudo apt install build-essential
-     ```
-   - **Fedora/RHEL:**
-     ```bash
-     sudo dnf install gcc
-     ```
-   - **macOS:**
-     ```bash
-     xcode-select --install
-     ```
+2. **Build tools**
 
-3. **Docker** (for connecting to Docker Swarm)
-   - Docker daemon must be running
-   - Access to Docker socket or TCP endpoint
+   - Ubuntu/Debian: `sudo apt install build-essential`
+   - Fedora/RHEL: `sudo dnf install gcc`
+   - macOS: `xcode-select --install`
+
+3. **Docker**, to talk to a swarm (only needed at run time, not to build)
+
+   - A reachable Docker daemon, via the local socket, `tcp://`, or `ssh://`
+   - A **manager** node for cluster-wide operations
 
 ## Building
 
-### Native Build (Recommended)
-
 ```bash
-# Clone repository
-git clone <repository-url>
+git clone https://github.com/Castle96/swarmctl
 cd swarmctl
 
-# Build debug version
-cargo build
-
-# Build release version (optimized)
-cargo build --release
-
-# Build with specific features
-cargo build --release --features <feature>
+cargo build              # debug
+cargo build --release    # optimized
 ```
 
-### Using Docker
+Binaries land in `target/debug/swarmctl` and `target/release/swarmctl`.
+
+### Feature flags
+
+The interactive dashboard and port visualizer sit behind the default `tui`
+feature:
 
 ```bash
-# Build inside Docker container
-docker run --rm -v $(pwd):/app -w /app rust:latest cargo build --release
-
-# Build with specific Rust version
-docker run --rm -v $(pwd):/app -w /app rust:1.75 cargo build --release
+cargo build --release                        # with TUI (default)
+cargo build --release --no-default-features  # without ratatui/crossterm
 ```
 
-## Running
+Both configurations are built and tested in CI, so `--no-default-features` is
+expected to keep working.
 
-### Binary Location
-
-After building:
-- Debug: `./target/debug/swarmctl`
-- Release: `./target/release/swarmctl`
-
-### Installation (Optional)
+### Using Docker to build
 
 ```bash
-# Copy to system PATH
-sudo cp ./target/release/swarmctl /usr/local/bin/swarmctl
-
-# Or install to user PATH
-mkdir -p ~/.local/bin
-cp ./target/release/swarmctl ~/.local/bin/
-export PATH="$HOME/.local/bin:$PATH"
+docker run --rm -v "$(pwd):/app" -w /app rust:latest cargo build --release
 ```
+
+Note this bind-mounts the source but not a Cargo cache, so it re-downloads and
+recompiles all dependencies. A named volume for `target/` and
+`$CARGO_HOME` makes repeat builds much faster.
+
+### Cross-compilation
+
+The crate is pure Rust with no C dependencies beyond the standard toolchain, so
+cross-compiling only needs the target's linker:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+cargo build --release --target aarch64-unknown-linux-gnu
+
+rustup target add x86_64-pc-windows-msvc   # or use --gnu with mingw
+cargo build --release --target x86_64-pc-windows-msvc
+```
+
+## Installing
+
+```bash
+make build-release          # builds, then copies to ~/.local/bin/swarmctl
+
+# or manually
+cargo install --path .
+
+# or system-wide
+sudo cp target/release/swarmctl /usr/local/bin/
+```
+
+Make sure `~/.local/bin` is on your `PATH`.
+
+## Verification
+
+```bash
+cargo fmt --all -- --check           # formatting
+cargo clippy --all-targets -- -D warnings
+cargo test                           # unit tests
+cargo build --no-default-features    # non-TUI configuration
+```
+
+`.github/workflows/ci.yml` runs all four on every push and pull request, and
+treats warnings as errors. Run them locally before opening a PR.
 
 ## Usage
 
-### View Help
-
 ```bash
-./target/release/swarmctl --help
-./target/release/swarmctl <command> --help
+swarmctl --help              # top-level commands
+swarmctl <command> --help    # per-command flags
+swarmctl explain services    # fields available to --field-selector / --sort-by
 ```
 
-### Available Commands
+Common commands:
 
 | Command | Description |
-|---------|-------------|
+|---|---|
 | `get` | Display one or many resources |
 | `describe` | Show detailed information about a resource |
-| `create` | Create a resource from a file or stdin |
-| `delete` | Delete resources |
-| `scale` | Scale a service |
-| `logs` | Fetch the logs of a resource |
-| `ports` | List and visualize port mappings |
-| `cluster-info` | Get cluster information |
-| `dashboard` | Launch interactive TUI dashboard |
-| `version` | Show version information |
+| `apply` / `replace` / `patch` / `diff` / `edit` | Declarative management |
+| `create` / `delete` | Imperative management |
+| `scale` / `rollout` | Change service replica counts |
+| `logs` / `exec` / `attach` / `cp` | Container interaction |
+| `cordon` / `uncordon` / `drain` / `taint` | Node scheduling control |
+| `swarm init\|join\|leave\|token\|status` | Swarm lifecycle |
+| `stack deploy\|ls\|rm` | Compose-based stack management |
+| `context` | Manage Docker contexts |
+| `vault` | Encrypted local storage for join tokens |
+| `discover` | Scan a subnet for Docker hosts and swarms |
+| `failover` / `volume` | Failover policy and volume migration |
+| `ports` | Port mapping inventory and availability |
+| `top` / `events` / `wait` | Observability |
+| `system info\|df\|ping` | Daemon-level information |
+| `dashboard` | Interactive TUI dashboard |
+| `completion <shell>` | Shell completions |
 
-### Resource Types
-
-```bash
-swarmctl get nodes
-swarmctl get services
-swarmctl get tasks
-swarmctl get networks
-swarmctl get secrets
-swarmctl get configs
-swarmctl get stacks
-```
-
-### Output Formats
-
-```bash
-# Table format (default)
-swarmctl get services
-
-# JSON format
-swarmctl get services -o json
-
-# YAML format
-swarmctl get services -o yaml
-```
-
-## Port Scanner
-
-The port scanner helps you manage container port mappings.
-
-```bash
-# List all port mappings
-swarmctl ports
-
-# TUI visualization
-swarmctl ports --tui
-
-# Show available ports in range
-swarmctl ports --available
-
-# Filter by protocol
-swarmctl ports --protocol tcp
-swarmctl ports --protocol udp
-
-# Custom port range
-swarmctl ports --range-start 30000 --range-end 40000
-
-# Combined options
-swarmctl ports --available --protocol tcp --range-start 8000 --range-end 9000
-```
-
-## TUI Dashboard
-
-Interactive terminal dashboard with real-time monitoring.
-
-```bash
-# Launch dashboard
-swarmctl dashboard
-```
-
-### Dashboard Controls
-
-| Key | Action |
-|-----|--------|
-| `Tab` | Switch between views |
-| `1` | Go to Services |
-| `2` | Go to Nodes |
-| `3` | Go to Networks |
-| `4` | Go to Ports |
-| `5` | Go to Secrets |
-| `6` | Go to Tasks |
-| `j` / `Down` | Navigate down |
-| `k` / `Up` | Navigate up |
-| `r` | Refresh data |
-| `q` | Quit |
-
-## Examples
-
-### Basic Operations
-
-```bash
-# List all services
-swarmctl get services
-
-# Get specific service
-swarmctl get services my-service
-
-# Describe a service
-swarmctl describe services my-service
-
-# Scale a service
-swarmctl scale my-service 5
-
-# View logs
-swarmctl logs service my-service
-swarmctl logs service my-service --follow
-
-# Cluster information
-swarmctl cluster-info
-```
-
-### Filtering and Selection
-
-```bash
-# Show labels
-swarmctl get services --show-labels
-
-# Filter by label
-swarmctl get services --selector app=web
-
-# Watch for changes
-swarmctl get services --watch
-```
-
-## Troubleshooting
-
-### Connection Issues
-
-```bash
-# Check if Docker is running
-docker info
-
-# Set Docker host explicitly
-export DOCKER_HOST=tcp://localhost:2375
-
-# Or use Unix socket
-export DOCKER_HOST=unix:///var/run/docker.sock
-```
-
-### Build Issues
-
-```bash
-# Update Rust
-rustup update
-
-# Clean and rebuild
-cargo clean
-cargo build --release
-
-# Check for errors
-cargo build --release 2>&1 | head -50
-```
-
-### Permission Issues
-
-```bash
-# Add user to docker group (Linux)
-sudo usermod -aG docker $USER
-# Log out and back in for changes to take effect
-
-# Or run with Docker socket access
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ./target/release/swarmctl get services
-```
+Resource types accepted by `get`, `describe`, and friends: `nodes` (`no`),
+`services` (`svc`), `tasks` (`po`), `networks` (`net`), `secrets` (`sec`),
+`configs` (`cm`), `stacks` (`st`).
 
 ## Configuration
 
-### Environment Variables
+| Variable | Purpose | Default |
+|---|---|---|
+| `DOCKER_HOST` | Daemon address | local socket |
+| `DOCKER_CONTEXT` | Context to use | current Docker context |
+| `DOCKER_TLS_VERIFY` | `1` enables TLS | unset |
+| `DOCKER_CERT_PATH` | Directory with `ca.pem`, `cert.pem`, `key.pem` | `~/.docker` |
+| `RUST_LOG` | Log level | `info` |
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DOCKER_HOST` | Docker daemon address | `unix:///var/run/docker.sock` |
-| `RUST_LOG` | Logging level | `info` |
+Resolution order: `--context`, then `--host` / `$DOCKER_HOST`, then the active
+Docker context, then the local socket.
 
-Example:
 ```bash
-export DOCKER_HOST=tcp://192.168.1.100:2375
+export DOCKER_HOST=ssh://user@swarm-manager.example.com
 export RUST_LOG=debug
-./swarmctl get services
+swarmctl get nodes
 ```
+
+## Connecting to a remote swarm
+
+### Over SSH (recommended — no TLS to configure)
+
+Docker's API is exposed on the remote host's socket, which SSH already protects
+with its own authentication and transport encryption:
+
+```bash
+swarmctl --host ssh://user@swarm-manager.example.com get nodes
+```
+
+### Over TCP with TLS
+
+Generate certificates with [dockerd-gen-certs](https://github.com/docker/docker-py/blob/master/docs/user-guide.rst#docker-contexts-tls),
+then point `swarmctl` at them:
+
+```bash
+swarmctl --host tcp://swarm-manager.example.com:2376 \
+         --tlscacert ~/.docker/ca.pem \
+         --tlscert  ~/.docker/cert.pem \
+         --tlskey   ~/.docker/key.pem \
+         get nodes
+```
+
+Or via environment variables:
+
+```bash
+export DOCKER_HOST=tcp://swarm-manager.example.com:2376
+export DOCKER_TLS_VERIFY=1
+export DOCKER_CERT_PATH=~/.docker
+swarmctl get nodes
+```
+
+### Over plain TCP
+
+Only appropriate on a trusted private network or a VPN/tailscale interface, and
+only for throwaway environments.
+
+> **Warning:** the Docker API grants full control of the host, including
+> mounting the root filesystem. Plain TCP on port 2375 is unauthenticated:
+> anything that can reach the port owns the machine. Never bind it to
+> `0.0.0.0` on a network you do not control, and never expose it to the
+> internet.
+
+If you must, bind to a specific private interface rather than all interfaces,
+and firewall the port to known peers:
+
+```ini
+# /etc/systemd/system/docker.service.d/override.conf
+[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd -H unix:///var/run/docker.sock -H tcp://10.0.0.5:2375
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+ss -lntp | grep dockerd
+```
+
+Prefer SSH or TLS for anything you care about.
+
+## Troubleshooting
+
+**`Cannot connect to the Docker daemon`**
+The daemon is not running, or the address is wrong. Check `docker info`, then
+`swarmctl system ping`. `swarmctl system info` prints the connection target
+`swarmctl` resolved and where it came from.
+
+**`Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the
+daemon running?` as a non-root user**
+Add yourself to the `docker` group, then log out and back in:
+
+```bash
+sudo usermod -aG docker "$USER"
+```
+
+**`503: This node is not a swarm manager`**
+Cluster operations need a manager. Check with `swarmctl swarm status`. On a
+fresh node, `swarmctl swarm init` creates a single-node swarm.
+
+**Build fails on `edition2024`**
+Your toolchain predates Rust 1.85. Run `rustup update stable`.
+
+**Build fails in a linker**
+Install the platform build tools listed under Prerequisites.
+
+**`error: unexpected argument '--watch'` on `get`**
+Older builds required the flag before the subcommand
+(`swarmctl --watch get services`). Current builds accept either position.
 
 ## Contributing
 
-When making changes:
-
-1. Make your changes
-2. Build to verify: `cargo build --release`
-3. Test locally
-4. Run tests: `cargo test`
-5. Commit changes
+1. Add capability in `api/` against the Bollard client.
+2. Map results into display structs in `models/`.
+3. Expose it from `cli/` (and `tui/` if it warrants a view).
+4. Keep pure logic free of I/O so it can be unit tested.
+5. Verify: `cargo fmt`, `cargo clippy --all-targets`, `cargo test`.
 
 ## License
 
-See LICENSE file for details.
+MIT — see [LICENSE](./LICENSE).

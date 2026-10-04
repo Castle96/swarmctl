@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 pub const VAULT_VERSION: u32 = 1;
-pub const VAULT_DIR: &str = ".swarmctl";
-pub const VAULT_FILE: &str = "vault.json";
 pub const SALT_LEN: usize = 32;
 pub const NONCE_LEN: usize = 12;
 

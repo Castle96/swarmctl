@@ -64,9 +64,7 @@ pub async fn run(
             }
         }
     } else {
-        return Err(anyhow::anyhow!(
-            "Must specify resource name or --selector"
-        ));
+        return Err(anyhow::anyhow!("Must specify resource name or --selector"));
     }
 
     Ok(())
@@ -88,8 +86,8 @@ async fn describe_node(
 
     match output {
         OutputFormat::Table => {
-            let spec = node.spec.as_ref().unwrap();
-            let status = node.status.as_ref().unwrap();
+            let spec = node.spec.clone().unwrap_or_default();
+            let status = node.status.clone().unwrap_or_default();
 
             println!("Name:\t{}", spec.name.as_ref().unwrap_or(&"".to_string()));
             println!("ID:\t{}", node.id.as_ref().unwrap_or(&"".to_string()));
@@ -146,7 +144,7 @@ async fn describe_node(
         OutputFormat::Json => crate::utils::printer::print_json(&node)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&node)?,
         OutputFormat::Wide | OutputFormat::Name => {
-            let spec = node.spec.as_ref().unwrap();
+            let spec = node.spec.clone().unwrap_or_default();
             println!("Name:\t{}", spec.name.as_ref().unwrap_or(&"".to_string()));
             println!("ID:\t{}", node.id.as_ref().unwrap_or(&"".to_string()));
         }
@@ -168,7 +166,7 @@ async fn describe_service(
 
     match output {
         OutputFormat::Table => {
-            let spec = service.spec.as_ref().unwrap();
+            let spec = service.spec.clone().unwrap_or_default();
 
             println!("Name:\t{}", spec.name.as_ref().unwrap_or(&"".to_string()));
             println!("ID:\t{}", service.id.as_ref().unwrap_or(&"".to_string()));
@@ -241,7 +239,7 @@ async fn describe_service(
         OutputFormat::Json => crate::utils::printer::print_json(&service)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&service)?,
         OutputFormat::Wide | OutputFormat::Name => {
-            let spec = service.spec.as_ref().unwrap();
+            let spec = service.spec.clone().unwrap_or_default();
             println!("Name:\t{}", spec.name.as_ref().unwrap_or(&"".to_string()));
             println!("ID:\t{}", service.id.as_ref().unwrap_or(&"".to_string()));
         }
@@ -388,7 +386,14 @@ async fn describe_secret(
         OutputFormat::Json => crate::utils::printer::print_json(&secret)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&secret)?,
         OutputFormat::Wide | OutputFormat::Name => {
-            println!("Name:\t{}", secret.spec.as_ref().and_then(|s| s.name.as_ref()).unwrap_or(&"unknown".to_string()));
+            println!(
+                "Name:\t{}",
+                secret
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.name.as_ref())
+                    .unwrap_or(&"unknown".to_string())
+            );
             println!("ID:\t{}", secret.id.unwrap_or_default());
         }
     }
@@ -432,7 +437,14 @@ async fn describe_config(
         OutputFormat::Json => crate::utils::printer::print_json(&config)?,
         OutputFormat::Yaml => crate::utils::printer::print_yaml(&config)?,
         OutputFormat::Wide | OutputFormat::Name => {
-            println!("Name:\t{}", config.spec.as_ref().and_then(|s| s.name.as_ref()).unwrap_or(&"unknown".to_string()));
+            println!(
+                "Name:\t{}",
+                config
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.name.as_ref())
+                    .unwrap_or(&"unknown".to_string())
+            );
             println!("ID:\t{}", config.id.unwrap_or_default());
         }
     }

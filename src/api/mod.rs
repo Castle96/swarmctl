@@ -4,7 +4,6 @@ pub mod context;
 pub mod discovery;
 pub mod docker_check;
 pub mod failover;
-pub mod migration;
 pub mod network;
 pub mod node;
 pub mod port;

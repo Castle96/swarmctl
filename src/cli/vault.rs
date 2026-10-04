@@ -45,18 +45,36 @@ pub async fn run_status() -> Result<()> {
     println!("═══════════════════════════════════════");
     println!("  Location:     ~/.swarmctl/vault.json");
     println!("  Created:      {}", status.created_at);
-    println!("  Swarm Name:   {}", if status.swarm_name.is_empty() { "(none)".to_string() } else { status.swarm_name });
-    println!("  Has Tokens:   {}", if status.has_tokens { "yes" } else { "no" });
-    println!("  Has Unlock:   {}", if status.has_unlock_key { "yes" } else { "no" });
+    println!(
+        "  Swarm Name:   {}",
+        if status.swarm_name.is_empty() {
+            "(none)".to_string()
+        } else {
+            status.swarm_name
+        }
+    );
+    println!(
+        "  Has Tokens:   {}",
+        if status.has_tokens { "yes" } else { "no" }
+    );
+    println!(
+        "  Has Unlock:   {}",
+        if status.has_unlock_key { "yes" } else { "no" }
+    );
     println!("  Nodes Tracked: {}", status.node_count);
 
-    if let Some(data) = vault.data() {
-        if !data.nodes.is_empty() {
-            println!();
-            println!("  Tracked Nodes:");
-            for node in &data.nodes {
-                println!("    - {} ({}) [{}]", node.hostname, node.role, &node.node_id[..12.min(node.node_id.len())]);
-            }
+    if let Some(data) = vault.data()
+        && !data.nodes.is_empty()
+    {
+        println!();
+        println!("  Tracked Nodes:");
+        for node in &data.nodes {
+            println!(
+                "    - {} ({}) [{}]",
+                node.hostname,
+                node.role,
+                &node.node_id[..12.min(node.node_id.len())]
+            );
         }
     }
 

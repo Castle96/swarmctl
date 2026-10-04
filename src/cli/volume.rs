@@ -22,12 +22,11 @@ pub async fn run_ls(client: &DockerClient, output: OutputFormat) -> anyhow::Resu
                 driver: v.driver,
                 mountpoint: v.mountpoint,
                 labels,
-                scope: v.scope
+                scope: v
+                    .scope
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "local".to_string()),
-                created_at: v.created_at
-                    .map(|d| format!("{}", d))
-                    .unwrap_or_default(),
+                created_at: v.created_at.map(|d| d.to_string()).unwrap_or_default(),
             }
         })
         .collect();
@@ -42,7 +41,11 @@ pub async fn run_ls(client: &DockerClient, output: OutputFormat) -> anyhow::Resu
     Ok(())
 }
 
-pub async fn run_inspect(client: &DockerClient, name: String, output: OutputFormat) -> anyhow::Result<()> {
+pub async fn run_inspect(
+    client: &DockerClient,
+    name: String,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
     let volume = crate::api::volume::inspect_volume(client.inner(), &name).await?;
 
     match output {
@@ -58,9 +61,13 @@ pub async fn run_inspect(client: &DockerClient, name: String, output: OutputForm
             println!("Name:        {}", volume.name);
             println!("Driver:      {}", volume.driver);
             println!("Mountpoint:  {}", volume.mountpoint);
-            println!("Scope:       {}", volume.scope
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "local".to_string()));
+            println!(
+                "Scope:       {}",
+                volume
+                    .scope
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "local".to_string())
+            );
             if !volume.labels.is_empty() {
                 println!("Labels:");
                 for (k, v) in &volume.labels {
@@ -96,13 +103,8 @@ pub async fn run_create(
 
     let driver = driver.unwrap_or_else(|| "local".to_string());
 
-    let volume = crate::api::volume::create_volume(
-        client.inner(),
-        &name,
-        &driver,
-        label_map,
-    )
-    .await?;
+    let volume =
+        crate::api::volume::create_volume(client.inner(), &name, &driver, label_map).await?;
 
     println!("Volume '{}' created.", volume.name);
     println!("  Driver: {}", volume.driver);

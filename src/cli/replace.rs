@@ -141,7 +141,10 @@ async fn replace_config(
             client.inner().create_config(spec).await?;
             println!("Config '{}' replaced", config_name);
         } else {
-            println!("Config '{}' already exists (use --force to replace)", config_name);
+            println!(
+                "Config '{}' already exists (use --force to replace)",
+                config_name
+            );
         }
     } else {
         client.inner().create_config(spec).await?;
@@ -189,7 +192,10 @@ async fn replace_secret(
             client.inner().create_secret(spec).await?;
             println!("Secret '{}' replaced", secret_name);
         } else {
-            println!("Secret '{}' already exists (use --force to replace)", secret_name);
+            println!(
+                "Secret '{}' already exists (use --force to replace)",
+                secret_name
+            );
         }
     } else {
         client.inner().create_secret(spec).await?;
