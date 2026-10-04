@@ -24,11 +24,7 @@ pub async fn run(
 
     match resource {
         "service" | "services" => {
-            let services = crate::api::service::list_services(client.inner()).await?;
-            let service = services
-                .into_iter()
-                .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name))
-                .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", name))?;
+            let service = crate::api::service::find_service(client.inner(), &name).await?;
 
             let version = service.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i32;
             let current = serde_json::to_value(&service)?;
@@ -54,12 +50,7 @@ pub async fn run(
             println!("Service '{}' patched", name);
         }
         "node" | "nodes" => {
-            let nodes = crate::api::node::list_nodes(client.inner()).await?;
-            let node = nodes
-                .into_iter()
-                .find(|n| n.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name))
-                .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
-
+            let node = crate::api::node::find_node(client.inner(), &name).await?;
             let version = node.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
             let current = serde_json::to_value(&node)?;
             let merged = json_merge(

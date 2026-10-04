@@ -5,35 +5,19 @@ use tempfile::NamedTempFile;
 pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow::Result<()> {
     let yaml = match resource {
         "service" | "services" => {
-            let services = crate::api::service::list_services(client.inner()).await?;
-            let service = services
-                .into_iter()
-                .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name))
-                .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", name))?;
+            let service = crate::api::service::find_service(client.inner(), &name).await?;
             serde_yaml::to_string(&service)?
         }
         "node" | "nodes" => {
-            let nodes = crate::api::node::list_nodes(client.inner()).await?;
-            let node = nodes
-                .into_iter()
-                .find(|n| n.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name))
-                .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
+            let node = crate::api::node::find_node(client.inner(), &name).await?;
             serde_yaml::to_string(&node)?
         }
         "secret" | "secrets" => {
-            let secrets = crate::api::secret::list_secrets(client.inner()).await?;
-            let secret = secrets
-                .into_iter()
-                .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name))
-                .ok_or_else(|| anyhow::anyhow!("Secret '{}' not found", name))?;
+            let secret = crate::api::secret::find_secret(client.inner(), &name).await?;
             serde_yaml::to_string(&secret)?
         }
         "config" | "configs" => {
-            let configs = crate::api::config::list_configs(client.inner()).await?;
-            let config = configs
-                .into_iter()
-                .find(|c| c.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name))
-                .ok_or_else(|| anyhow::anyhow!("Config '{}' not found", name))?;
+            let config = crate::api::config::find_config(client.inner(), &name).await?;
             serde_yaml::to_string(&config)?
         }
         _ => anyhow::bail!("Unsupported resource type for edit: {}", resource),

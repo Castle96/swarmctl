@@ -68,12 +68,7 @@ pub async fn run(
     remove: Vec<String>,
     overwrite: bool,
 ) -> anyhow::Result<()> {
-    let nodes = crate::api::node::list_nodes(client.inner()).await?;
-    let node = nodes
-        .into_iter()
-        .find(|n| n.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name))
-        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
-
+    let node = crate::api::node::find_node(client.inner(), &name).await?;
     let node_id = node
         .id
         .as_deref()

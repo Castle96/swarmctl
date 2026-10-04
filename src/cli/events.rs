@@ -47,85 +47,40 @@ pub async fn run(
 }
 
 pub fn normalize_time(s: &str) -> String {
-    if let Some(seconds) = parse_relative_duration(s) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        (now - seconds).to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-fn parse_relative_duration(s: &str) -> Option<i64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let mut total: i64 = 0;
-    let mut current = String::new();
-    let mut has_unit = false;
-    for c in s.chars() {
-        if c.is_ascii_digit() {
-            current.push(c);
-        } else {
-            has_unit = true;
-            let n: i64 = current.parse().ok()?;
-            current.clear();
-            let multiplier: i64 = match c {
-                's' => 1,
-                'm' => 60,
-                'h' => 3600,
-                'd' => 86400,
-                'w' => 604800,
-                _ => return None,
-            };
-            total = total.checked_add(n.checked_mul(multiplier)?)?;
-        }
-    }
-    if has_unit && !current.is_empty() {
-        let n: i64 = current.parse().ok()?;
-        total = total.checked_add(n)?;
-    }
-    has_unit.then_some(total)
+    crate::utils::time::resolve_since(s, crate::utils::time::epoch_secs())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::normalize_time;
 
     #[test]
-    fn parses_units() {
-        assert_eq!(parse_relative_duration("30s"), Some(30));
-        assert_eq!(parse_relative_duration("5m"), Some(300));
-        assert_eq!(parse_relative_duration("1h"), Some(3600));
-        assert_eq!(parse_relative_duration("1d"), Some(86400));
-        assert_eq!(parse_relative_duration("1w"), Some(604800));
+    fn relative_durations_become_timestamps() {
+        for (input, expected_offset) in [("30s", 30i64), ("5m", 300), ("1h", 3600), ("1d", 86400)] {
+            let resolved: i64 = normalize_time(input).parse().unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            assert!(
+                (now - resolved - expected_offset).abs() < 5,
+                "{input} resolved to {resolved}"
+            );
+        }
     }
 
     #[test]
-    fn parses_combined() {
-        assert_eq!(parse_relative_duration("2h30m"), Some(9000));
-        assert_eq!(parse_relative_duration("1h15m30s"), Some(4530));
+    fn absolute_timestamps_pass_through() {
+        assert_eq!(normalize_time("1754760000"), "1754760000");
     }
 
     #[test]
-    fn passes_through_unix_timestamp() {
-        assert_eq!(parse_relative_duration("1754760000"), None);
-        assert_eq!(parse_relative_duration(""), None);
-        assert_eq!(parse_relative_duration("abc"), None);
-    }
-
-    #[test]
-    fn normalize_converts_duration_passes_timestamp() {
-        let n = normalize_time("30s");
-        let ts: i64 = n.parse().unwrap();
+    fn compound_durations_are_accepted() {
+        let resolved: i64 = normalize_time("1h30m").parse().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        assert!((now - ts - 30).abs() < 5);
-        assert_eq!(normalize_time("1754760000"), "1754760000");
+        assert!((now - resolved - 5400).abs() < 5);
     }
 }

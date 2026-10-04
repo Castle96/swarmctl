@@ -147,12 +147,7 @@ impl FailoverMonitor {
 }
 
 fn chrono_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let secs = duration.as_secs();
-    let mins = secs / 60;
-    let hours = mins / 60;
-    format!("{:02}:{:02}:{:02}", hours % 24, mins % 60, secs % 60)
+    crate::utils::time::hms(crate::utils::time::epoch_secs())
 }
 
 #[allow(dead_code)]

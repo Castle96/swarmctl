@@ -317,13 +317,7 @@ async fn describe_network(
     name: &str,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
-    let networks = crate::api::network::list_networks(client.inner()).await?;
-    let network = networks
-        .into_iter()
-        .find(|n| {
-            n.name.as_ref() == Some(&name.to_string()) || n.id.as_ref() == Some(&name.to_string())
-        })
-        .ok_or_else(|| anyhow::anyhow!("Network {} not found", name))?;
+    let network = crate::api::network::find_network(client.inner(), name).await?;
 
     match output {
         OutputFormat::Table => {

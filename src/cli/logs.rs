@@ -28,26 +28,23 @@ pub async fn run(
     Ok(())
 }
 
+/// Resolve `--since` to a Unix timestamp.
+///
+/// Accepts a duration (`30s`, `5m`, `2h`, `1d`, `1w`, `1h30m`) or an absolute
+/// Unix timestamp. A value with no unit is a timestamp, matching Docker.
 fn parse_since(since: &str) -> anyhow::Result<i64> {
     let trimmed = since.trim();
-    if let Some(s) = trimmed.strip_suffix('s') {
-        let num: i64 = s.parse()?;
-        return Ok(num);
+    if let Some(seconds) = crate::utils::time::parse_duration_secs(trimmed) {
+        return Ok(crate::utils::time::epoch_secs() - seconds);
     }
-    if let Some(m) = trimmed.strip_suffix('m') {
-        let num: i64 = m.parse()?;
-        return Ok(num * 60);
-    }
-    if let Some(h) = trimmed.strip_suffix('h') {
-        let num: i64 = h.parse()?;
-        return Ok(num * 3600);
-    }
-    if let Some(d) = trimmed.strip_suffix('d') {
-        let num: i64 = d.parse()?;
-        return Ok(num * 86400);
-    }
-    let num: i64 = trimmed.parse()?;
-    Ok(num)
+    // No unit: treat as an absolute timestamp.
+    trimmed.parse::<i64>().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid --since value '{}'. Use a Unix timestamp, or a relative duration such as \
+             30s, 5m, 2h, 1d, 1w, or 1h30m.",
+            since
+        )
+    })
 }
 
 async fn logs_service(client: &DockerClient, name: String, opts: LogOptions) -> anyhow::Result<()> {
@@ -60,11 +57,8 @@ async fn logs_service(client: &DockerClient, name: String, opts: LogOptions) -> 
         prefix,
         ignore_errors,
     } = opts;
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let _service = services
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|spec| spec.name.as_ref()) == Some(&name))
-        .ok_or_else(|| anyhow::anyhow!("Service {} not found", name))?;
+    // Fails early with a clear message if the service does not exist.
+    crate::api::service::find_service(client.inner(), &name).await?;
 
     if previous {
         let mut filters = std::collections::HashMap::new();
@@ -231,30 +225,54 @@ async fn logs_task(client: &DockerClient, task_id: String, opts: LogOptions) -> 
 #[cfg(test)]
 mod tests {
     use super::parse_since;
+    use crate::utils::time::epoch_secs;
 
-    #[test]
-    fn parses_unit_suffixes() {
-        assert_eq!(parse_since("30s").unwrap(), 30);
-        assert_eq!(parse_since("5m").unwrap(), 300);
-        assert_eq!(parse_since("2h").unwrap(), 7200);
-        assert_eq!(parse_since("1d").unwrap(), 86400);
+    /// Assert the resolved timestamp is roughly `offset` seconds ago.
+    #[track_caller]
+    fn assert_offset(result: anyhow::Result<i64>, offset: i64) {
+        let resolved = result.expect("should parse");
+        assert!(
+            (epoch_secs() - resolved - offset).abs() < 5,
+            "expected ~{offset}s ago, got {}",
+            epoch_secs() - resolved
+        );
     }
 
     #[test]
-    fn bare_number_is_already_seconds() {
-        assert_eq!(parse_since("42").unwrap(), 42);
+    fn resolves_unit_suffixes_to_relative_times() {
+        assert_offset(parse_since("30s"), 30);
+        assert_offset(parse_since("5m"), 300);
+        assert_offset(parse_since("2h"), 7200);
+        assert_offset(parse_since("1d"), 86_400);
+    }
+
+    #[test]
+    fn resolves_compound_durations() {
+        assert_offset(parse_since("1h30m"), 5400);
+    }
+
+    #[test]
+    fn absolute_timestamps_pass_through_unchanged() {
+        assert_eq!(parse_since("1754760000").unwrap(), 1_754_760_000);
+        assert_eq!(parse_since("  1754760000 ").unwrap(), 1_754_760_000);
     }
 
     #[test]
     fn tolerates_surrounding_whitespace() {
-        assert_eq!(parse_since("  10m  ").unwrap(), 600);
+        assert_offset(parse_since("  10m  "), 600);
     }
 
     #[test]
-    fn rejects_non_numeric_and_unknown_units() {
-        assert!(parse_since("abc").is_err());
-        assert!(parse_since("10x").is_err());
-        assert!(parse_since("m").is_err());
-        assert!(parse_since("").is_err());
+    fn rejects_unparseable_and_ambiguous_values() {
+        for bad in ["abc", "10x", "m", "", "5m3", "1y"] {
+            assert!(parse_since(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn rejection_message_names_the_accepted_forms() {
+        let err = parse_since("nonsense").unwrap_err().to_string();
+        assert!(err.contains("30s"), "got: {err}");
+        assert!(err.contains("timestamp"), "got: {err}");
     }
 }

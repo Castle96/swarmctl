@@ -4,11 +4,7 @@ pub async fn run(client: &DockerClient, name: &str, replicas: u64) -> anyhow::Re
     println!("Scaling service {} to {} replicas...", name, replicas);
 
     // Find the service
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let service = services
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|spec| spec.name.as_ref()) == Some(&name.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("Service {} not found", name))?;
+    let service = crate::api::service::find_service(client.inner(), name).await?;
 
     // Update the service spec with new replica count
     let mut spec = service.spec.unwrap_or_default();

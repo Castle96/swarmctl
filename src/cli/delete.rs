@@ -134,11 +134,7 @@ async fn apply_grace_period(client: &DockerClient, name: &str, grace: i64) -> an
         anyhow::bail!("--grace-period must not be negative (got {})", grace);
     }
 
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let Some(service) = services
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_deref()) == Some(name))
-    else {
+    let Some(service) = crate::api::service::find_service_opt(client.inner(), name).await? else {
         // Nothing to configure; the delete below will report the real error.
         return Ok(());
     };
@@ -437,10 +433,7 @@ async fn delete_node(
             return Ok(());
         }
 
-        let nodes = crate::api::node::list_nodes(client.inner()).await?;
-        let node = nodes
-            .into_iter()
-            .find(|n| n.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name));
+        let node = crate::api::node::find_node_opt(client.inner(), &name).await?;
 
         match node {
             Some(node) => {

@@ -81,10 +81,7 @@ async fn apply_service(
         return Ok(());
     }
 
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let existing = services
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&service_name));
+    let existing = crate::api::service::find_service_opt(client.inner(), &service_name).await?;
 
     if let Some(existing) = existing {
         let version = existing.version.and_then(|v| v.index).unwrap_or(0) as i32;
@@ -133,10 +130,7 @@ async fn apply_config(
         return Ok(());
     }
 
-    let configs = crate::api::config::list_configs(client.inner()).await?;
-    let existing = configs
-        .into_iter()
-        .find(|c| c.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&config_name));
+    let existing = crate::api::config::find_config_opt(client.inner(), &config_name).await?;
 
     if existing.is_some() {
         anyhow::bail!(
@@ -176,10 +170,7 @@ async fn apply_secret(
         return Ok(());
     }
 
-    let secrets = crate::api::secret::list_secrets(client.inner()).await?;
-    let existing = secrets
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&secret_name));
+    let existing = crate::api::secret::find_secret_opt(client.inner(), &secret_name).await?;
 
     if existing.is_some() {
         anyhow::bail!(

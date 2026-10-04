@@ -6,11 +6,7 @@ pub async fn run_image(
     service_name: String,
     image: String,
 ) -> anyhow::Result<()> {
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let service = services
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&service_name))
-        .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name))?;
+    let service = crate::api::service::find_service(client.inner(), &service_name).await?;
 
     let version = service.version.and_then(|v| v.index).unwrap_or(0) as i32;
     let mut spec = service.spec.unwrap_or_default();
@@ -51,11 +47,7 @@ pub async fn run_env(
     env: Vec<String>,
     replace: bool,
 ) -> anyhow::Result<()> {
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let service = services
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&service_name))
-        .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name))?;
+    let service = crate::api::service::find_service(client.inner(), &service_name).await?;
 
     let version = service.version.and_then(|v| v.index).unwrap_or(0) as i32;
     let mut spec = service.spec.unwrap_or_default();
@@ -110,11 +102,7 @@ pub async fn run_replicas(
     service_name: String,
     replicas: u64,
 ) -> anyhow::Result<()> {
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let service = services
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&service_name))
-        .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name))?;
+    let service = crate::api::service::find_service(client.inner(), &service_name).await?;
 
     let version = service.version.and_then(|v| v.index).unwrap_or(0) as i32;
     let mut spec = service.spec.unwrap_or_default();

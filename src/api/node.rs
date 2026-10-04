@@ -8,6 +8,34 @@ pub async fn list_nodes(docker: &Docker) -> anyhow::Result<Vec<Node>> {
         .await?)
 }
 
+/// A node's display name: `Description.Hostname`, falling back to `Spec.Name`.
+///
+/// `Spec.Name` is often empty for nodes that joined before a hostname was
+/// recorded, so prefer the description.
+pub fn node_hostname(node: &Node) -> Option<String> {
+    node.description
+        .as_ref()
+        .and_then(|d| d.hostname.clone())
+        .or_else(|| node.spec.as_ref().and_then(|s| s.name.clone()))
+}
+
+/// Find a node by hostname or id.
+pub async fn find_node(docker: &Docker, name: &str) -> anyhow::Result<Node> {
+    list_nodes(docker)
+        .await?
+        .into_iter()
+        .find(|n| node_hostname(n).as_deref() == Some(name) || n.id.as_deref() == Some(name))
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))
+}
+
+/// Find a node by hostname or id, or `None`.
+pub async fn find_node_opt(docker: &Docker, name: &str) -> anyhow::Result<Option<Node>> {
+    Ok(list_nodes(docker)
+        .await?
+        .into_iter()
+        .find(|n| node_hostname(n).as_deref() == Some(name) || n.id.as_deref() == Some(name)))
+}
+
 pub async fn promote_node(docker: &Docker, node_id: &str) -> anyhow::Result<()> {
     let node = docker.inspect_node(node_id).await?;
     let version = node.version.and_then(|v| v.index).unwrap_or(0);

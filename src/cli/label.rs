@@ -51,11 +51,7 @@ async fn update_service_labels(
     overwrite: bool,
     delete_all: bool,
 ) -> anyhow::Result<()> {
-    let services = crate::api::service::list_services(client.inner()).await?;
-    let service = services
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", name))?;
+    let service = crate::api::service::find_service(client.inner(), name).await?;
 
     let version = service.version.and_then(|v| v.index).unwrap_or(0) as i32;
     let mut spec = service.spec.unwrap_or_default();
@@ -98,12 +94,7 @@ async fn update_node_labels(
     overwrite: bool,
     delete_all: bool,
 ) -> anyhow::Result<()> {
-    let nodes = crate::api::node::list_nodes(client.inner()).await?;
-    let node = nodes
-        .into_iter()
-        .find(|n| n.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
-
+    let node = crate::api::node::find_node(client.inner(), name).await?;
     let version = node.version.and_then(|v| v.index).unwrap_or(0) as i64;
     let mut spec = node.spec.unwrap_or_default();
 
@@ -142,11 +133,7 @@ async fn update_secret_labels(
     overwrite: bool,
     delete_all: bool,
 ) -> anyhow::Result<()> {
-    let secrets = crate::api::secret::list_secrets(client.inner()).await?;
-    let secret = secrets
-        .into_iter()
-        .find(|s| s.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("Secret '{}' not found", name))?;
+    let secret = crate::api::secret::find_secret(client.inner(), name).await?;
 
     let version = secret.version.and_then(|v| v.index).unwrap_or(0) as i64;
     let mut spec = secret.spec.unwrap_or_default();
@@ -186,11 +173,7 @@ async fn update_config_labels(
     overwrite: bool,
     delete_all: bool,
 ) -> anyhow::Result<()> {
-    let configs = crate::api::config::list_configs(client.inner()).await?;
-    let config = configs
-        .into_iter()
-        .find(|c| c.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("Config '{}' not found", name))?;
+    let config = crate::api::config::find_config(client.inner(), name).await?;
 
     let version = config.version.and_then(|v| v.index).unwrap_or(0) as i64;
     let mut spec = config.spec.unwrap_or_default();

@@ -226,10 +226,7 @@ async fn check_node_ready(
     name: &str,
     condition: &str,
 ) -> anyhow::Result<bool> {
-    let nodes = crate::api::node::list_nodes(client.inner()).await?;
-    let node = nodes
-        .into_iter()
-        .find(|n| n.spec.as_ref().and_then(|sp| sp.name.as_deref()) == Some(name));
+    let node = crate::api::node::find_node_opt(client.inner(), name).await?;
 
     let condition = condition.to_lowercase();
     match node {

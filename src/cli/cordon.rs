@@ -16,12 +16,7 @@ pub async fn run_uncordon(client: &DockerClient, name: String) -> anyhow::Result
 }
 
 pub async fn run_drain(client: &DockerClient, name: String) -> anyhow::Result<()> {
-    let nodes = crate::api::node::list_nodes(client.inner()).await?;
-    let node = nodes
-        .into_iter()
-        .find(|n| n.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
-
+    let node = crate::api::node::find_node(client.inner(), &name).await?;
     let version = node.version.and_then(|v| v.index).unwrap_or(0) as i64;
     let mut spec = node.spec.unwrap_or_default();
     spec.availability = Some(NodeSpecAvailabilityEnum::DRAIN);
@@ -43,12 +38,7 @@ async fn set_availability(
     availability: NodeSpecAvailabilityEnum,
     action: &str,
 ) -> anyhow::Result<()> {
-    let nodes = crate::api::node::list_nodes(client.inner()).await?;
-    let node = nodes
-        .into_iter()
-        .find(|n| n.spec.as_ref().and_then(|sp| sp.name.as_ref()) == Some(&name.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", name))?;
-
+    let node = crate::api::node::find_node(client.inner(), name).await?;
     let version = node.version.and_then(|v| v.index).unwrap_or(0) as i64;
     let mut spec = node.spec.unwrap_or_default();
     spec.availability = Some(availability);
