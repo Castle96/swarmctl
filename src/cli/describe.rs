@@ -36,7 +36,7 @@ pub async fn run(
                         .and_then(|sp| sp.name.as_ref())
                         .unwrap_or(&"unknown".to_string())
                         .clone();
-                    describe_service(client, &svc_name, output.clone()).await?;
+                    describe_service(client, &svc_name, output).await?;
                 }
             }
             ResourceType::Nodes => {
@@ -54,7 +54,7 @@ pub async fn run(
                         .and_then(|sp| sp.name.as_ref())
                         .unwrap_or(&"unknown".to_string())
                         .clone();
-                    describe_node(client, &node_name, output.clone()).await?;
+                    describe_node(client, &node_name, output).await?;
                 }
             }
             _ => {

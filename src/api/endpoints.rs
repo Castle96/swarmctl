@@ -151,7 +151,8 @@ impl Registry {
         Ok(out)
     }
 
-    /// Every endpoint marked `default`, or all of them if none is.
+    /// Endpoints to target when `--endpoints` names none: those marked
+    /// `default`, or all of them if none is marked.
     pub fn defaults(&self) -> Vec<Endpoint> {
         let marked: Vec<Endpoint> = self
             .endpoints
@@ -313,8 +314,8 @@ pub fn validate(endpoint: &Endpoint) -> Result<()> {
         }
     }
 
-    if let Some(env) = &endpoint.environment {
-        if ![
+    if let Some(env) = &endpoint.environment
+        && ![
             "prod",
             "production",
             "staging",
@@ -324,14 +325,13 @@ pub fn validate(endpoint: &Endpoint) -> Result<()> {
             "lab",
         ]
         .contains(&env.as_str())
-        {
-            log::warn!(
-                "Endpoint '{}' has an unrecognised environment '{}' (expected one of \
+    {
+        log::warn!(
+            "Endpoint '{}' has an unrecognised environment '{}' (expected one of \
                  prod, staging, dev, test, lab)",
-                endpoint.name,
-                env
-            );
-        }
+            endpoint.name,
+            env
+        );
     }
 
     Ok(())

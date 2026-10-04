@@ -38,12 +38,6 @@ pub fn failover_file() -> PathBuf {
 ///
 /// The directory holds the encrypted vault; on a shared machine a world-readable
 /// directory would expose it even if the file mode is tight.
-pub fn ensure_swarmctl_dir() -> std::io::Result<PathBuf> {
-    let dir = swarmctl_dir();
-    ensure_swarmctl_dir_at(&dir)?;
-    Ok(dir)
-}
-
 /// Create `dir` with owner-only permissions.
 pub fn ensure_swarmctl_dir_at(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -89,11 +83,15 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result
     std::fs::write(path, contents)
 }
 
-/// Write a file readable by anyone (used only for non-secret data).
-#[allow(dead_code)]
+/// Write a non-secret file under the swarmctl state directory.
+///
+/// The parent directory is still restricted to the owner: it is shared with the
+/// vault, so leaving it world-readable would weaken the vault file's own 0600.
 pub fn write_public(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        ensure_swarmctl_dir_at(parent)?;
     }
     std::fs::write(path, contents)
 }
@@ -143,6 +141,22 @@ mod tests {
         let path = tmp.path().join("nested/deeper/secret.json");
         write_private(&path, b"{}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_write_still_restricts_the_shared_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".swarmctl");
+        let path = dir.join("endpoints.json");
+        write_public(&path, b"{}").unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "the state directory is shared with the vault and must stay private"
+        );
     }
 
     #[cfg(unix)]

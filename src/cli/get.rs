@@ -1,6 +1,6 @@
 use crate::api::client::DockerClient;
 use crate::cli::root::{OutputFormat, ResourceType};
-use crate::models::{network::NetworkRow, node::NodeRow, service::ServiceRow};
+use crate::models::{node::NodeRow, service::ServiceRow};
 use crate::utils::printer::{print_json, print_table, print_yaml, render_rows, sort_rows};
 use crate::utils::selectors::{format_labels, matches_selector};
 
@@ -41,51 +41,51 @@ pub async fn run(
         match resource {
             ResourceType::Nodes => {
                 if let Some(name) = &name {
-                    get_node(client, name, output.clone()).await?;
+                    get_node(client, name, output).await?;
                 } else {
-                    get_nodes(client, output.clone(), &list_opts).await?;
+                    get_nodes(client, output, &list_opts).await?;
                 }
             }
             ResourceType::Services => {
                 if let Some(name) = &name {
-                    get_service(client, name, output.clone()).await?;
+                    get_service(client, name, output).await?;
                 } else {
-                    get_services(client, output.clone(), &list_opts).await?;
+                    get_services(client, output, &list_opts).await?;
                 }
             }
             ResourceType::Tasks => {
                 if let Some(name) = &name {
-                    get_task(client, name, output.clone()).await?;
+                    get_task(client, name, output).await?;
                 } else {
-                    get_tasks(client, output.clone(), &list_opts).await?;
+                    get_tasks(client, output, &list_opts).await?;
                 }
             }
             ResourceType::Networks => {
                 if let Some(name) = &name {
-                    get_network(client, name, output.clone()).await?;
+                    get_network(client, name, output).await?;
                 } else {
-                    get_networks(client, output.clone(), &list_opts).await?;
+                    get_networks(client, output, &list_opts).await?;
                 }
             }
             ResourceType::Secrets => {
                 if let Some(name) = &name {
-                    get_secret(client, name, output.clone()).await?;
+                    get_secret(client, name, output).await?;
                 } else {
-                    get_secrets(client, output.clone(), &list_opts).await?;
+                    get_secrets(client, output, &list_opts).await?;
                 }
             }
             ResourceType::Configs => {
                 if let Some(name) = &name {
-                    get_config(client, name, output.clone()).await?;
+                    get_config(client, name, output).await?;
                 } else {
-                    get_configs(client, output.clone(), &list_opts).await?;
+                    get_configs(client, output, &list_opts).await?;
                 }
             }
             ResourceType::Stacks => {
                 if let Some(name) = &name {
-                    get_stack(client, name, output.clone()).await?;
+                    get_stack(client, name, output).await?;
                 } else {
-                    get_stacks(client, output.clone(), show_labels, watch).await?;
+                    get_stacks(client, output, show_labels, watch).await?;
                 }
             }
         }
@@ -99,6 +99,34 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Keep objects matching the label selector and the field selector.
+///
+/// Selectors are evaluated against the raw API object (not the rendered row),
+/// which is what users expect from `--field-selector spec.name=web`.
+fn keep<T: serde::Serialize>(
+    items: Vec<T>,
+    labels: impl Fn(&T) -> Option<std::collections::HashMap<String, String>>,
+    selector: Option<&String>,
+    field_selector: Option<&String>,
+) -> Vec<T> {
+    items
+        .into_iter()
+        .filter(|item| {
+            selector
+                .map(|sel| matches_selector(&labels(item), sel))
+                .unwrap_or(true)
+        })
+        .filter(|item| {
+            field_selector
+                .map(|sel| {
+                    let json = serde_json::to_value(item).unwrap_or_default();
+                    matches_field_selector(&json, sel)
+                })
+                .unwrap_or(true)
+        })
+        .collect()
 }
 
 fn matches_field_selector(value: &serde_json::Value, field_selector: &str) -> bool {
@@ -129,68 +157,13 @@ async fn get_nodes(
     let show_labels = *show_labels;
     let nodes = crate::api::node::list_nodes(client.inner()).await?;
 
-    let rows: Vec<NodeRow> = nodes
-        .into_iter()
-        .filter(|n| {
-            selector
-                .as_ref()
-                .map(|sel| matches_selector(&n.spec.as_ref().and_then(|s| s.labels.clone()), sel))
-                .unwrap_or(true)
-        })
-        .filter(|n| {
-            field_selector
-                .as_ref()
-                .map(|sel| {
-                    let json = serde_json::to_value(n).unwrap_or_default();
-                    matches_field_selector(&json, sel)
-                })
-                .unwrap_or(true)
-        })
-        .map(|n| {
-            let spec = n.spec.as_ref().cloned().unwrap_or_default();
-            let status = n.status.as_ref().cloned().unwrap_or_default();
-
-            let manager = n
-                .manager_status
-                .as_ref()
-                .map(|m| {
-                    match m
-                        .reachability
-                        .unwrap_or(bollard::models::Reachability::UNKNOWN)
-                    {
-                        bollard::models::Reachability::REACHABLE => "Reachable",
-                        bollard::models::Reachability::UNREACHABLE => "Unavailable",
-                        _ => "-",
-                    }
-                })
-                .unwrap_or("-");
-
-            let hostname = n
-                .description
-                .as_ref()
-                .and_then(|d| d.hostname.clone())
-                .or_else(|| {
-                    let s = n.spec.clone().unwrap_or_default();
-                    s.name.clone()
-                })
-                .unwrap_or_default();
-
-            NodeRow {
-                id: n.id.unwrap_or_default(),
-                hostname,
-                status: status
-                    .state
-                    .unwrap_or(bollard::models::NodeState::READY)
-                    .to_string(),
-                availability: spec
-                    .availability
-                    .unwrap_or(bollard::models::NodeSpecAvailabilityEnum::ACTIVE)
-                    .to_string(),
-                manager: manager.to_string(),
-                labels: format_labels(&spec.labels),
-            }
-        })
-        .collect();
+    let nodes = keep(
+        nodes,
+        |n: &bollard::models::Node| n.spec.as_ref().and_then(|s| s.labels.clone()),
+        selector.as_ref(),
+        field_selector.as_ref(),
+    );
+    let rows: Vec<NodeRow> = crate::cli::rows::node_rows(&nodes);
 
     let mut rows = rows;
     if let Some(sort_field) = sort_by.as_deref() {
@@ -199,22 +172,6 @@ async fn get_nodes(
     render_rows(&rows, &output, show_labels)?;
 
     Ok(())
-}
-
-/// Map service id -> number of tasks actually running.
-async fn running_counts_by_service(
-    client: &DockerClient,
-) -> anyhow::Result<std::collections::HashMap<String, usize>> {
-    let mut counts: std::collections::HashMap<String, usize> = Default::default();
-    for task in crate::api::task::list_tasks(client.inner()).await? {
-        if !crate::api::task::task_is_running(&task) {
-            continue;
-        }
-        if let Some(id) = task.service_id {
-            *counts.entry(id).or_insert(0) += 1;
-        }
-    }
-    Ok(counts)
 }
 
 async fn get_services(
@@ -232,61 +189,13 @@ async fn get_services(
     let show_labels = *show_labels;
     let services = crate::api::service::list_services(client.inner()).await?;
 
-    // One tasks listing feeds the REPLICAS column for every service.
-    let running_counts = running_counts_by_service(client).await?;
-
-    let rows: Vec<ServiceRow> = services
-        .into_iter()
-        .filter(|s| {
-            selector
-                .as_ref()
-                .map(|sel| {
-                    matches_selector(&s.spec.as_ref().and_then(|spec| spec.labels.clone()), sel)
-                })
-                .unwrap_or(true)
-        })
-        .filter(|s| {
-            field_selector
-                .as_ref()
-                .map(|sel| {
-                    let json = serde_json::to_value(s).unwrap_or_default();
-                    matches_field_selector(&json, sel)
-                })
-                .unwrap_or(true)
-        })
-        .map(|s| {
-            let service_id = s.id.clone().unwrap_or_default();
-            let spec = s.spec.clone().unwrap_or_default();
-
-            let name = spec.name.clone().unwrap_or_default();
-            let image = spec
-                .task_template
-                .and_then(|t| t.container_spec)
-                .and_then(|c| c.image)
-                .unwrap_or_default();
-
-            let (mode, replicas) = match spec.mode {
-                Some(m) if m.replicated.is_some() => {
-                    let desired = m.replicated.unwrap().replicas.unwrap_or(0);
-                    // The old code printed `desired/desired`, so the column could
-                    // never show a problem. Count tasks that are actually running.
-                    let running = running_counts.get(&service_id).copied().unwrap_or(0);
-                    ("replicated".to_string(), format!("{}/{}", running, desired))
-                }
-                Some(_) => ("global".to_string(), "N/A".to_string()),
-                None => ("unknown".to_string(), "N/A".to_string()),
-            };
-
-            ServiceRow {
-                id: service_id,
-                name,
-                mode,
-                replicas,
-                image,
-                labels: format_labels(&spec.labels),
-            }
-        })
-        .collect();
+    let services = keep(
+        services,
+        |s: &bollard::models::Service| s.spec.as_ref().and_then(|sp| sp.labels.clone()),
+        selector.as_ref(),
+        field_selector.as_ref(),
+    );
+    let rows: Vec<ServiceRow> = crate::cli::rows::service_rows(client.inner(), &services).await?;
 
     let mut rows = rows;
     if let Some(sort_field) = sort_by.as_deref() {
@@ -401,38 +310,6 @@ async fn get_service(
     Ok(())
 }
 
-/// Render a task's published ports for table output.
-///
-/// `TaskSpecContainerSpec` has no port field: the Engine API reports bindings on
-/// `Task.Status.PortStatus`, so that is the only place to read them from. The
-/// column used to be hardcoded to an empty string.
-fn format_task_ports(task: &bollard::models::Task) -> String {
-    let Some(ports) = task
-        .status
-        .as_ref()
-        .and_then(|s| s.port_status.as_ref())
-        .and_then(|p| p.ports.as_ref())
-    else {
-        return String::new();
-    };
-    let rendered: Vec<String> = ports
-        .iter()
-        .map(|p| {
-            let proto = p
-                .protocol
-                .map(|v| format!("{:?}", v).to_lowercase())
-                .unwrap_or_else(|| "tcp".to_string());
-            match (p.published_port, p.target_port) {
-                (Some(public), Some(target)) => format!("{}:{}/{}", public, target, proto),
-                (Some(public), None) => format!("{}/{}", public, proto),
-                (None, Some(target)) => format!("{}/{}", target, proto),
-                _ => proto,
-            }
-        })
-        .collect();
-    rendered.join(",")
-}
-
 async fn get_tasks(
     client: &DockerClient,
     output: OutputFormat,
@@ -471,78 +348,19 @@ async fn get_tasks(
             }
         };
 
-    let rows: Vec<crate::models::task::TaskRow> = tasks
-        .into_iter()
-        .filter(|t| {
-            selector
-                .as_ref()
-                .map(|sel| {
-                    matches_selector(
-                        &t.spec
-                            .as_ref()
-                            .and_then(|s| s.container_spec.as_ref())
-                            .and_then(|c| c.labels.clone()),
-                        sel,
-                    )
-                })
-                .unwrap_or(true)
-        })
-        .filter(|t| {
-            field_selector
-                .as_ref()
-                .map(|sel| {
-                    let json = serde_json::to_value(t).unwrap_or_default();
-                    matches_field_selector(&json, sel)
-                })
-                .unwrap_or(true)
-        })
-        .map(|t| {
-            let labels = t
-                .spec
+    let tasks = keep(
+        tasks,
+        |t: &bollard::models::Task| {
+            t.spec
                 .as_ref()
                 .and_then(|s| s.container_spec.as_ref())
-                .and_then(|c| c.labels.clone());
-            let ports = format_task_ports(&t);
-            let node_id = t.node_id.clone();
-            crate::models::task::TaskRow {
-                id: t.id.clone().unwrap_or_default(),
-                name: t.name.clone().unwrap_or_default(),
-                desired_state: format!(
-                    "{:?}",
-                    t.desired_state
-                        .unwrap_or(bollard::models::TaskState::RUNNING)
-                ),
-                current_state: t
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.state)
-                    .map(|v| format!("{:?}", v))
-                    .unwrap_or_default(),
-                image: t
-                    .spec
-                    .as_ref()
-                    .and_then(|s| s.container_spec.as_ref())
-                    .and_then(|c| c.image.clone())
-                    .unwrap_or_default(),
-                // PORTS was hardcoded to an empty string, so the column was
-                // permanently blank. Task port configs live under
-                // ContainerSpec.Privileges, not on the task itself.
-                ports,
-                // Prefer the hostname so this matches `get nodes`, which shows
-                // hostnames rather than raw IDs.
-                node: node_id
-                    .as_ref()
-                    .map(|id| {
-                        node_hostnames
-                            .get(id)
-                            .cloned()
-                            .unwrap_or_else(|| id.clone())
-                    })
-                    .unwrap_or_default(),
-                labels: format_labels(&labels),
-            }
-        })
-        .collect();
+                .and_then(|c| c.labels.clone())
+        },
+        selector.as_ref(),
+        field_selector.as_ref(),
+    );
+    let rows: Vec<crate::models::task::TaskRow> =
+        crate::cli::rows::task_rows_with_nodes(&tasks, &node_hostnames);
 
     let mut rows = rows;
     if let Some(sort_field) = sort_by.as_deref() {
@@ -621,36 +439,13 @@ async fn get_networks(
     let show_labels = *show_labels;
     let networks = crate::api::network::list_networks(client.inner()).await?;
 
-    let rows: Vec<NetworkRow> = networks
-        .into_iter()
-        .filter(|n| {
-            selector
-                .as_ref()
-                .map(|sel| matches_selector(&n.labels.clone(), sel))
-                .unwrap_or(true)
-        })
-        .filter(|n| {
-            field_selector
-                .as_ref()
-                .map(|sel| {
-                    let json = serde_json::to_value(n).unwrap_or_default();
-                    matches_field_selector(&json, sel)
-                })
-                .unwrap_or(true)
-        })
-        .map(|n| {
-            let scope = n.scope.unwrap_or_else(|| "unknown".to_string());
-            let internal = n.internal.unwrap_or(false);
-            NetworkRow {
-                id: n.id.unwrap_or_default(),
-                name: n.name.unwrap_or("unknown".to_string()),
-                driver: n.driver.unwrap_or_else(|| "unknown".to_string()),
-                scope,
-                internal: if internal { "true" } else { "false" }.to_string(),
-                labels: format_labels(&n.labels),
-            }
-        })
-        .collect();
+    let networks = keep(
+        networks,
+        |n: &bollard::models::Network| n.labels.clone(),
+        selector.as_ref(),
+        field_selector.as_ref(),
+    );
+    let rows = crate::cli::rows::network_rows(&networks);
 
     let mut rows = rows;
     if let Some(sort_field) = sort_by.as_deref() {
@@ -718,35 +513,13 @@ async fn get_secrets(
     let show_labels = *show_labels;
     let secrets = crate::api::secret::list_secrets(client.inner()).await?;
 
-    let rows: Vec<crate::models::secret::SecretRow> = secrets
-        .into_iter()
-        .filter(|s| {
-            selector
-                .as_ref()
-                .map(|sel| {
-                    matches_selector(&s.spec.as_ref().and_then(|spec| spec.labels.clone()), sel)
-                })
-                .unwrap_or(true)
-        })
-        .filter(|s| {
-            field_selector
-                .as_ref()
-                .map(|sel| {
-                    let json = serde_json::to_value(s).unwrap_or_default();
-                    matches_field_selector(&json, sel)
-                })
-                .unwrap_or(true)
-        })
-        .map(|s| {
-            let labels = s.spec.as_ref().and_then(|spec| spec.labels.clone());
-            crate::models::secret::SecretRow {
-                id: s.id.unwrap_or_default(),
-                name: s.spec.unwrap_or_default().name.unwrap_or_default(),
-                created_at: s.created_at.unwrap_or_default(),
-                labels: format_labels(&labels),
-            }
-        })
-        .collect();
+    let secrets = keep(
+        secrets,
+        |s: &bollard::models::Secret| s.spec.as_ref().and_then(|sp| sp.labels.clone()),
+        selector.as_ref(),
+        field_selector.as_ref(),
+    );
+    let rows = crate::cli::rows::secret_rows(&secrets);
 
     let mut rows = rows;
     if let Some(sort_field) = sort_by.as_deref() {
@@ -813,35 +586,13 @@ async fn get_configs(
     let show_labels = *show_labels;
     let configs = crate::api::config::list_configs(client.inner()).await?;
 
-    let rows: Vec<crate::models::config::ConfigRow> = configs
-        .into_iter()
-        .filter(|c| {
-            selector
-                .as_ref()
-                .map(|sel| {
-                    matches_selector(&c.spec.as_ref().and_then(|spec| spec.labels.clone()), sel)
-                })
-                .unwrap_or(true)
-        })
-        .filter(|c| {
-            field_selector
-                .as_ref()
-                .map(|sel| {
-                    let json = serde_json::to_value(c).unwrap_or_default();
-                    matches_field_selector(&json, sel)
-                })
-                .unwrap_or(true)
-        })
-        .map(|c| {
-            let labels = c.spec.as_ref().and_then(|spec| spec.labels.clone());
-            crate::models::config::ConfigRow {
-                id: c.id.unwrap_or_default(),
-                name: c.spec.unwrap_or_default().name.unwrap_or_default(),
-                created_at: c.created_at.unwrap_or_default(),
-                labels: format_labels(&labels),
-            }
-        })
-        .collect();
+    let configs = keep(
+        configs,
+        |c: &bollard::models::Config| c.spec.as_ref().and_then(|sp| sp.labels.clone()),
+        selector.as_ref(),
+        field_selector.as_ref(),
+    );
+    let rows = crate::cli::rows::config_rows(&configs);
 
     let mut rows = rows;
     if let Some(sort_field) = sort_by.as_deref() {

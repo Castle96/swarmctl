@@ -1,23 +1,23 @@
 use crate::api::client::DockerClient;
 use crate::cli::{
     api_resources, apply, attach, cluster, completion, config, context, cordon, cp, create, delete,
-    describe, diff, discover, edit, endpoint, events, exec, explain, failover, get, label, logs,
-    patch, port_forward, ports, replace, rollout, run, scale, set, stack, swarm, system, taint,
-    top, vault, volume, wait,
+    describe, diff, discover, edit, endpoint, events, exec, explain, failover, fanout, get, label,
+    logs, patch, port_forward, ports, replace, rollout, run, scale, set, stack, swarm, system,
+    taint, top, vault, volume, wait,
 };
 #[cfg(feature = "tui")]
 use crate::tui;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(name = "swarmctl")]
 #[command(about = "Docker Swarm control plane CLI")]
 #[command(long_about = "A kubectl-inspired CLI for managing Docker Swarm clusters")]
 pub struct Cli {
     /// Output format
     #[arg(short, long, value_enum, default_value = "table")]
-    output: OutputFormat,
+    pub(crate) output: OutputFormat,
 
     /// Watch for changes
     // Global so it works in either position: `swarmctl --watch get services`
@@ -53,12 +53,27 @@ pub struct Cli {
     #[arg(long)]
     skip_tls_verify: bool,
 
+    /// Comma-separated endpoint names to run this command against
+    ///
+    /// Registered with `swarmctl endpoint add`. Runs the command against every
+    /// listed endpoint and combines the results.
+    #[arg(long, global = true, value_name = "NAMES")]
+    pub(crate) endpoints: Option<String>,
+
+    /// With --endpoints, include endpoints that are not marked default
+    #[arg(long, global = true, requires = "endpoints")]
+    pub(crate) all_endpoints: bool,
+
+    /// Assume yes to confirmation prompts (required for write fan-out in scripts)
+    #[arg(short = 'y', long, global = true)]
+    pub(crate) yes: bool,
+
     /// Verbose output level
     #[arg(short = 'v', global = true, action = clap::ArgAction::Count)]
     verbose: u8,
 
     #[command(subcommand)]
-    command: Commands,
+    pub(crate) command: Commands,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -71,7 +86,7 @@ pub enum OutputFormat {
 }
 
 #[derive(Clone, Subcommand)]
-enum Commands {
+pub(crate) enum Commands {
     /// Display one or many resources
     Get {
         /// Resource type (can be comma-separated: svc,po)
@@ -580,6 +595,23 @@ enum Commands {
         command: SwarmCommand,
     },
 
+    /// Compare resources between two endpoints
+    DiffClusters {
+        /// Left endpoint name
+        left: String,
+
+        /// Right endpoint name
+        right: String,
+
+        /// Resource kind to compare (tasks are excluded: their ids are per-run)
+        #[arg(long, value_enum, default_value = "services")]
+        resource: DiffResourceType,
+
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Manage the local vault
     Vault {
         #[command(subcommand)]
@@ -1047,7 +1079,35 @@ pub enum RolloutCommand {
     },
 }
 
-#[derive(Clone, ValueEnum, Debug)]
+/// Resource kinds that can be compared across clusters.
+///
+/// A separate enum from [`ResourceType`] so `--help` lists only valid choices
+/// and clap rejects `tasks` up front, rather than the handler explaining why
+/// afterwards.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Debug)]
+pub enum DiffResourceType {
+    Nodes,
+    Services,
+    Networks,
+    Secrets,
+    Configs,
+    Stacks,
+}
+
+impl From<DiffResourceType> for ResourceType {
+    fn from(value: DiffResourceType) -> Self {
+        match value {
+            DiffResourceType::Nodes => ResourceType::Nodes,
+            DiffResourceType::Services => ResourceType::Services,
+            DiffResourceType::Networks => ResourceType::Networks,
+            DiffResourceType::Secrets => ResourceType::Secrets,
+            DiffResourceType::Configs => ResourceType::Configs,
+            DiffResourceType::Stacks => ResourceType::Stacks,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Debug)]
 pub enum ResourceType {
     Nodes,
     Services,
@@ -1330,11 +1390,23 @@ impl Cli {
         Self::dispatch(&cli, cli.command.clone(), client).await
     }
 
-    /// Execute a command against an already-connected client.
-    ///
-    /// Split out from `run` so the same command can be replayed against several
-    /// endpoints for fan-out, which requires `Commands: Clone`.
+    /// Execute a command, honouring `--endpoints` fan-out.
     async fn dispatch(cli: &Cli, command: Commands, client: &DockerClient) -> anyhow::Result<()> {
+        // Fan-out replaces the single-endpoint path entirely; the default client
+        // is only used when no endpoints were named.
+        if let Some(selection) = fanout::requested(cli).transpose()? {
+            return fanout::run(cli, command, selection).await;
+        }
+
+        Self::dispatch_single(cli, command, client).await
+    }
+
+    /// Execute a command against one already-connected client.
+    pub(crate) async fn dispatch_single(
+        cli: &Cli,
+        command: Commands,
+        client: &DockerClient,
+    ) -> anyhow::Result<()> {
         match command {
             // Dispositioned above, before a Docker connection was required.
             Commands::Endpoint { .. }
@@ -1696,6 +1768,32 @@ impl Cli {
             } => {
                 replace::run(client, resource, filename, stdin, dry_run, force).await?;
             }
+            Commands::DiffClusters {
+                left,
+                right,
+                resource,
+                output,
+            } => {
+                let registry = crate::api::endpoints::Registry::load()?;
+                let endpoints = registry.select(&[left, right])?;
+                let result =
+                    crate::api::diff::diff(&endpoints[0], &endpoints[1], resource.into()).await?;
+
+                match output {
+                    OutputFormat::Json => crate::utils::printer::print_json(&result)?,
+                    OutputFormat::Yaml => crate::utils::printer::print_yaml(&result)?,
+                    _ => print!("{}", crate::api::diff::render_diff(&result)),
+                }
+
+                // Non-zero when the clusters differ or a side was unreachable,
+                // so a CI job can gate on "these clusters match".
+                if !result.identical
+                    || result.left_unreachable.is_some()
+                    || result.right_unreachable.is_some()
+                {
+                    std::process::exit(1);
+                }
+            }
             Commands::Swarm { command } => match command {
                 SwarmCommand::Init { advertise_addr } => {
                     swarm::run_init(client, advertise_addr).await?;
@@ -1826,19 +1924,26 @@ impl Cli {
                 default,
                 sync,
             } => {
-                endpoint::run_add(
+                let tls = if tlscacert.is_some() || tlscert.is_some() || tlskey.is_some() {
+                    Some(crate::api::context::TlsConfig {
+                        ca_file: tlscacert,
+                        cert_file: tlscert,
+                        key_file: tlskey,
+                    })
+                } else {
+                    None
+                };
+                endpoint::run_add(endpoint::AddOptions {
                     name,
                     host,
                     description,
                     site,
                     environment,
                     tags,
-                    tlscacert,
-                    tlscert,
-                    tlskey,
-                    default,
-                    sync,
-                )
+                    tls,
+                    set_default: default,
+                    sync_docker: sync,
+                })
                 .await?;
             }
             EndpointCommand::Rm { name, sync } => endpoint::run_rm(name, sync).await?,
@@ -2053,6 +2158,169 @@ mod tests {
                 .is_ok()
         );
         assert!(Cli::try_parse_from(["swarmctl", "-c", "prod", "get", "nodes"]).is_ok());
+    }
+
+    #[test]
+    fn endpoint_commands_parse() {
+        for argv in [
+            vec!["swarmctl", "endpoint", "ls"],
+            vec!["swarmctl", "endpoint", "ls", "-o", "json"],
+            vec!["swarmctl", "endpoint", "ls", "--json"],
+            vec![
+                "swarmctl",
+                "endpoint",
+                "add",
+                "prod-eu",
+                "--host",
+                "ssh://ops@10.8.0.4",
+            ],
+            vec![
+                "swarmctl",
+                "endpoint",
+                "add",
+                "prod-eu",
+                "--host",
+                "tcp://10.8.0.4:2376",
+                "--tlscacert",
+                "/ca.pem",
+                "--tlscert",
+                "/cert.pem",
+                "--tlskey",
+                "/key.pem",
+                "--site",
+                "eu-west",
+                "--env",
+                "prod",
+                "--tags",
+                "offsite,vpn",
+                "--sync",
+            ],
+            vec!["swarmctl", "endpoint", "rm", "prod-eu", "--sync"],
+            vec!["swarmctl", "endpoint", "inspect", "prod-eu"],
+            vec!["swarmctl", "endpoint", "health"],
+            vec!["swarmctl", "endpoint", "health", "--endpoint", "a,b"],
+            vec!["swarmctl", "endpoint", "health", "--watch"],
+            vec!["swarmctl", "endpoint", "import"],
+            vec!["swarmctl", "endpoint", "import", "--prune"],
+            vec!["swarmctl", "endpoint", "use", "prod-eu"],
+            vec!["swarmctl", "endpoint", "sync"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "failed to parse: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_add_requires_a_host() {
+        assert!(Cli::try_parse_from(["swarmctl", "endpoint", "add", "prod-eu"]).is_err());
+    }
+
+    #[test]
+    fn vault_commands_parse() {
+        for argv in [
+            vec!["swarmctl", "vault", "init"],
+            vec!["swarmctl", "vault", "status"],
+            vec!["swarmctl", "vault", "unlock"],
+            vec!["swarmctl", "vault", "set-key"],
+            vec!["swarmctl", "vault", "ls"],
+            vec!["swarmctl", "vault", "ls", "-o", "json"],
+            vec![
+                "swarmctl",
+                "vault",
+                "store",
+                "prod-eu",
+                "--worker-token",
+                "w",
+                "--manager-token",
+                "m",
+            ],
+            vec!["swarmctl", "vault", "rm", "prod-eu"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "failed to parse: {argv:?}"
+            );
+        }
+        // A store with no token at all is caught at runtime with a clear message,
+        // so only the missing endpoint name is a parse error.
+        assert!(Cli::try_parse_from(["swarmctl", "vault", "store"]).is_err());
+    }
+
+    #[test]
+    fn fanout_flags_parse_and_depend_on_endpoints() {
+        assert!(Cli::try_parse_from(["swarmctl", "--endpoints", "a,b", "get", "nodes"]).is_ok());
+        assert!(Cli::try_parse_from(["swarmctl", "get", "nodes", "--endpoints", "a,b"]).is_ok());
+        // --all-endpoints is meaningless without --endpoints.
+        assert!(Cli::try_parse_from(["swarmctl", "--all-endpoints", "get", "nodes"]).is_err());
+        assert!(Cli::try_parse_from(["swarmctl", "-y", "get", "nodes"]).is_ok());
+    }
+
+    #[test]
+    fn diff_clusters_parses() {
+        for argv in [
+            vec!["swarmctl", "diff-clusters", "a", "b"],
+            vec![
+                "swarmctl",
+                "diff-clusters",
+                "a",
+                "b",
+                "--resource",
+                "services",
+            ],
+            vec![
+                "swarmctl",
+                "diff-clusters",
+                "a",
+                "b",
+                "--resource",
+                "nodes",
+                "-o",
+                "json",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "failed to parse: {argv:?}"
+            );
+        }
+        assert!(Cli::try_parse_from(["swarmctl", "diff-clusters", "a"]).is_err());
+        assert!(
+            Cli::try_parse_from(["swarmctl", "diff-clusters", "a", "b", "--resource", "tasks"])
+                .is_err(),
+            "tasks are not comparable, so clap should not offer them"
+        );
+    }
+
+    #[test]
+    fn patch_type_is_forwarded_and_validated_at_runtime() {
+        // Accepted by clap, rejected by the handler with a clear message.
+        assert!(
+            Cli::try_parse_from([
+                "swarmctl",
+                "patch",
+                "services",
+                "web",
+                "--patch",
+                "{}",
+                "--patch-type",
+                "json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "swarmctl",
+                "patch",
+                "services",
+                "web",
+                "--patch",
+                "{}",
+                "--dry-run"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

@@ -19,22 +19,13 @@ pub struct VaultFile {
 }
 
 /// Decrypted vault contents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VaultData {
     #[serde(default)]
     pub created_at: String,
     /// Credentials keyed by endpoint name.
     #[serde(default)]
     pub endpoints: std::collections::BTreeMap<String, EndpointSecrets>,
-}
-
-impl Default for VaultData {
-    fn default() -> Self {
-        Self {
-            created_at: String::new(),
-            endpoints: Default::default(),
-        }
-    }
 }
 
 impl VaultData {
@@ -389,8 +380,10 @@ mod tests {
 
     #[test]
     fn vault_data_round_trips_as_json() {
-        let mut v = VaultData::default();
-        v.created_at = "123".into();
+        let mut v = VaultData {
+            created_at: "123".into(),
+            ..Default::default()
+        };
         v.store(
             "prod",
             EndpointSecrets {

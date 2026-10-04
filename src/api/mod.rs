@@ -1,6 +1,7 @@
 pub mod client;
 pub mod config;
 pub mod context;
+pub mod diff;
 pub mod discovery;
 pub mod docker_check;
 pub mod endpoints;

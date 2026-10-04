@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tabled::Tabled;
 
-#[derive(Clone, Tabled, Serialize)]
+#[derive(Clone, Debug, Tabled, Serialize)]
 pub struct ContextRow {
     pub name: String,
     pub description: String,

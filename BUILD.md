@@ -86,8 +86,8 @@ Make sure `~/.local/bin` is on your `PATH`.
 
 ```bash
 cargo fmt --all -- --check           # formatting
-cargo clippy --all-targets -- -D warnings
-cargo test                           # unit tests
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features            # unit tests
 cargo build --no-default-features    # non-TUI configuration
 ```
 
@@ -116,6 +116,8 @@ Common commands:
 | `swarm init\|join\|leave\|token\|status` | Swarm lifecycle |
 | `stack deploy\|ls\|rm` | Compose-based stack management |
 | `context` | Manage Docker contexts |
+| `endpoint` | Manage named remote endpoints (clusters) |
+| `diff-clusters` | Compare resources between two endpoints |
 | `vault` | Encrypted local storage for join tokens |
 | `discover` | Scan a subnet for Docker hosts and swarms |
 | `failover` / `volume` | Failover policy and volume migration |
@@ -180,6 +182,22 @@ export DOCKER_TLS_VERIFY=1
 export DOCKER_CERT_PATH=~/.docker
 swarmctl get nodes
 ```
+
+### Managing several clusters
+
+Register each cluster as a named endpoint, then check or target them in bulk:
+
+```bash
+swarmctl endpoint add prod-eu --host ssh://ops@10.8.0.4 --site eu-west --env prod
+swarmctl endpoint ls
+swarmctl endpoint health
+swarmctl get nodes --endpoints prod-eu,prod-us
+swarmctl diff-clusters prod-eu prod-us --resource services
+```
+
+See the README for the full endpoint, fan-out and diff workflow. Adding
+`--sync` also writes a Docker context, so `docker --context prod-eu info` works
+against the same endpoint.
 
 ### Over plain TCP
 

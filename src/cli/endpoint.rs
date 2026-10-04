@@ -68,30 +68,32 @@ pub async fn run_ls(output: OutputFormat, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_add(
-    name: String,
-    host: String,
-    description: Option<String>,
-    site: Option<String>,
-    environment: Option<String>,
-    tags: Vec<String>,
-    tlscacert: Option<String>,
-    tlscert: Option<String>,
-    tlskey: Option<String>,
-    set_default: bool,
-    sync_docker: bool,
-) -> Result<()> {
-    let mut reg = load()?;
+/// Everything `endpoint add` accepts, as one value.
+pub struct AddOptions {
+    pub name: String,
+    pub host: String,
+    pub description: Option<String>,
+    pub site: Option<String>,
+    pub environment: Option<String>,
+    pub tags: Vec<String>,
+    pub tls: Option<TlsConfig>,
+    pub set_default: bool,
+    pub sync_docker: bool,
+}
 
-    let tls = if tlscacert.is_some() || tlscert.is_some() || tlskey.is_some() {
-        Some(TlsConfig {
-            ca_file: tlscacert,
-            cert_file: tlscert,
-            key_file: tlskey,
-        })
-    } else {
-        None
-    };
+pub async fn run_add(opts: AddOptions) -> Result<()> {
+    let AddOptions {
+        name,
+        host,
+        description,
+        site,
+        environment,
+        tags,
+        tls,
+        set_default,
+        sync_docker,
+    } = opts;
+    let mut reg = load()?;
 
     // Preserve metadata on replace so `endpoint add` can be used to amend.
     let existing = reg.get(&name).cloned();

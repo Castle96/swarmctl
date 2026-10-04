@@ -66,7 +66,12 @@ pub async fn run_status() -> Result<()> {
     );
 
     let data = vault.data();
-    if !data.endpoints.is_empty() {
+    if !data.has_any() {
+        println!();
+        println!("  No credentials stored yet.");
+        println!("  Add them with:");
+        println!("    swarmctl vault store <endpoint> --manager-token <token>");
+    } else if !data.endpoints.is_empty() {
         println!();
         println!("  Entries:");
         for (name, entry) in &data.endpoints {

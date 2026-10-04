@@ -116,7 +116,7 @@ pub async fn probe(endpoint: Endpoint) -> EndpointHealth {
     health.docker_version = info.server_version.clone();
     health.hostname = info.name.clone();
 
-    let swarm_state = info.swarm.as_ref().and_then(|s| s.local_node_state.clone());
+    let swarm_state = info.swarm.as_ref().and_then(|s| s.local_node_state);
     let swarm_active = swarm_state.as_ref().is_some_and(|s| {
         !matches!(
             s,
@@ -131,11 +131,11 @@ pub async fn probe(endpoint: Endpoint) -> EndpointHealth {
 
     // Swarm identity and size. A non-manager cannot inspect the swarm, so those
     // stay empty rather than being reported as an error.
-    if let Ok(swarm) = tokio::time::timeout(PROBE_TIMEOUT, client.inner().inspect_swarm()).await {
-        if let Ok(swarm) = swarm {
-            health.swarm_id = swarm.id.clone();
-            health.swarm_name = swarm.spec.as_ref().and_then(|s| s.name.clone());
-        }
+    if let Ok(swarm) = tokio::time::timeout(PROBE_TIMEOUT, client.inner().inspect_swarm()).await
+        && let Ok(swarm) = swarm
+    {
+        health.swarm_id = swarm.id.clone();
+        health.swarm_name = swarm.spec.as_ref().and_then(|s| s.name.clone());
     }
 
     match tokio::time::timeout(PROBE_TIMEOUT, crate::api::node::list_nodes(client.inner())).await {
