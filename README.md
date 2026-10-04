@@ -216,6 +216,11 @@ equivalent).
 subcommand: `swarmctl --watch get services` and `swarmctl get services --watch`
 are equivalent.
 
+`--since` (on `logs` and `events`) accepts an absolute Unix timestamp or a
+relative duration — `30s`, `5m`, `2h`, `1d`, `1w`, or a compound `1h30m`. A value
+with no unit is a timestamp, matching Docker: write `30s`, not `30`, for "the
+last 30 seconds".
+
 ### Output formats
 
 ```bash
@@ -414,7 +419,11 @@ smaller binary without `ratatui`/`crossterm`.
   free of I/O so it can be unit tested; see the `#[cfg(test)]` modules.
 - Cluster-wide flags that apply to several commands are bundled into a
   `*Options` struct (`get::ListOptions`, `delete::DeleteOptions`,
-  `logs::LogOptions`) rather than passed as long positional parameter lists.
+  `logs::LogOptions`, `endpoint::AddOptions`) rather than passed as long
+  positional parameter lists.
+- Resource lookup goes through `api::*::find_*`; row construction through
+  `cli::rows`; duration parsing through `utils::time`. Each has one
+  implementation so behaviour cannot drift between commands.
 
 ## Troubleshooting
 
