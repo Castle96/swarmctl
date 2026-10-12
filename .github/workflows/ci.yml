@@ -5,58 +5,85 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Lets CI be re-run on demand. Without this the workflow can only be
+  # triggered by pushing, which makes it impossible to verify after fixing a
+  # transient failure such as a registry outage or a flaky cache.
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes an in-flight run. Without this,
+# rapid pushes queue up runs that test commits nobody will ship.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # Fail the build on any compiler warning, including in build scripts.
   RUSTFLAGS: -D warnings
+  # rustdoc lints are controlled separately; RUSTFLAGS does not reach rustdoc.
+  RUSTDOCFLAGS: -D warnings
 
 jobs:
   ci:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # --locked makes Cargo.lock authoritative. Without it, a stale lockfile is
+      # silently regenerated and CI tests dependency versions nobody committed.
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
+      # The TUI sits behind the default `tui` feature, so this is the build that
+      # catches a `ratatui`/`crossterm` import leaking into a non-TUI path.
       - name: Build (no default features)
-        run: cargo build --no-default-features
+        run: cargo build --locked --no-default-features
+
+      - name: Docs
+        run: cargo doc --locked --no-deps --all-features
 
   release:
     name: release build
     runs-on: ubuntu-latest
     needs: ci
+    timeout-minutes: 25
+    # Only on main, and only for real pushes. `workflow_dispatch` on main is
+    # excluded: a manual re-run is a verification, not a shipment.
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: release
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: cargo build --locked --release
 
       - name: Package binary and docs
         run: |
@@ -64,7 +91,16 @@ jobs:
           cp target/release/swarmctl dist/
           cp README.md BUILD.md LICENSE dist/
 
-      - uses: actions/upload-artifact@v4
+      # The published binary is unpacked and run by users; a checksum makes it
+      # verifiable without a signature.
+      - name: Checksum
+        run: |
+          cd dist
+          sha256sum swarmctl > swarmctl.sha256
+          cat swarmctl.sha256
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: swarmctl-linux-x86_64
           path: dist/
+          if-no-files-found: error

@@ -2,7 +2,7 @@
 //!
 //! Everything the tool stores for itself lives under a single directory so it is
 //! easy to locate, back up, and reason about permissions for. Docker's own
-//! configuration is a separate concern and lives in [`docker_config_dir`].
+//! configuration is a separate concern: see `crate::api::context`.
 
 use std::path::PathBuf;
 

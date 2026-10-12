@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// Only the keys swarmctl cares about are modelled. Everything else in the
 /// file (`auths`, `credsStore`, `psFormat`, `experimental`, ...) is preserved
 /// verbatim on write by operating on a `serde_json::Value`; see
-/// [`write_current_context`].
+/// [`set_current_context_in`].
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DockerConfig {
     #[serde(rename = "currentContext", default)]
