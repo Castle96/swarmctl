@@ -2,7 +2,6 @@ use crate::api::client::DockerClient;
 use crate::cli::root::OutputFormat;
 use crate::models::failover::FailoverEvent;
 use anyhow::Context;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 pub struct FailoverManager {
@@ -10,20 +9,24 @@ pub struct FailoverManager {
     event_rx: mpsc::UnboundedReceiver<FailoverEvent>,
     #[allow(dead_code)]
     event_tx: mpsc::UnboundedSender<FailoverEvent>,
-    events: Arc<Mutex<Vec<FailoverEvent>>>,
+    /// Accumulated events.
+    ///
+    /// A plain `Vec`, not `Arc<Mutex<_>>`. `check` takes `&mut self`, so the
+    /// `Arc` was never needed — and this field had already caused a
+    /// self-deadlock when the guard was held across the drain loop below.
+    events: Vec<FailoverEvent>,
 }
 
 impl FailoverManager {
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let events = Arc::new(Mutex::new(Vec::new()));
         let monitor = crate::api::failover::FailoverMonitor::new(event_tx.clone());
 
         Self {
             monitor,
             event_rx,
             event_tx,
-            events,
+            events: Vec::new(),
         }
     }
 
@@ -33,16 +36,14 @@ impl FailoverManager {
 
         let events = self.monitor.check_and_update(&nodes, &tasks);
 
-        // Take the guard once. The previous version held `stored_events` from
-        // the enclosing scope and then locked the same non-reentrant Mutex again
-        // inside the `try_recv` loop, which deadlocks as soon as the loop body
-        // runs — i.e. on the second observation.
-        let mut stored = self.events.lock().unwrap();
-        stored.extend(events);
-        drop(stored);
+        // No lock needed: `check` holds `&mut self`. The previous version held
+        // a `MutexGuard` from the enclosing scope and then re-locked the same
+        // non-reentrant mutex inside the `try_recv` loop, which deadlocked as
+        // soon as the loop body ran — i.e. on the second observation.
+        self.events.extend(events);
 
         while let Ok(event) = self.event_rx.try_recv() {
-            self.events.lock().unwrap().push(event);
+            self.events.push(event);
         }
 
         Ok(())
@@ -55,7 +56,7 @@ impl FailoverManager {
         Ok(())
     }
 
-    pub fn set_enabled(&self, enabled: bool) {
+    pub fn set_enabled(&mut self, enabled: bool) {
         self.monitor.set_enabled(enabled);
     }
 
@@ -64,7 +65,7 @@ impl FailoverManager {
     }
 
     pub fn get_events(&self) -> Vec<FailoverEvent> {
-        self.events.lock().unwrap().clone()
+        self.events.clone()
     }
 }
 

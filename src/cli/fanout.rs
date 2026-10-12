@@ -6,9 +6,13 @@
 
 use crate::api::client::DockerClient;
 use crate::api::endpoints::{Endpoint, Registry, to_connection_config};
+use crate::cli::registry::ResourceType;
 use crate::cli::root::{Cli, Commands};
+use crate::models::Named;
+use crate::utils::selectors::keep_matching;
 use anyhow::Result;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Concurrent endpoints contacted at once.
@@ -77,6 +81,9 @@ pub fn is_read_only(command: &Commands) -> bool {
         | ApiResources
         | Explain { .. }
         | Ports { .. } => true,
+
+        // Drift only reads, and exits non-zero on drift so it can gate CI.
+        Drift { .. } => true,
 
         // `system info/df` read; nothing under `system` mutates today.
         System { .. } => true,
@@ -158,14 +165,14 @@ where
 }
 
 /// Print a per-endpoint result table and return the failure count.
+///
+/// Always prints. It used to print nothing when every endpoint succeeded, which
+/// only worked because callers printed their own copy of the table — and that
+/// produced two identical tables on any partial failure.
 pub fn report_outcomes(outcomes: &[EndpointOutcome]) -> usize {
     use crate::models::endpoint::NONE_CELL;
 
     let failures = outcomes.iter().filter(|o| !o.ok).count();
-
-    if outcomes.iter().all(|o| o.ok) {
-        return failures;
-    }
 
     println!();
     println!("Results:");
@@ -424,13 +431,13 @@ async fn run_read_only(cli: &Cli, command: &Commands, endpoints: &[Endpoint]) ->
     use crate::cli::root::Commands;
 
     let output = match command {
-        Commands::Get { output, .. } => output.unwrap_or(cli.output),
-        _ => cli.output,
+        Commands::Get { output, .. } => output.clone().unwrap_or_else(|| cli.output.clone()),
+        _ => cli.output.clone(),
     };
 
     let resource = match command {
-        Commands::Get { resource, .. } => Some(*resource),
-        Commands::Describe { resource, .. } => Some(*resource),
+        Commands::Get { resource, .. } => Some(resource.clone()),
+        Commands::Describe { resource, .. } => Some(resource.clone()),
         _ => None,
     };
 
@@ -439,7 +446,19 @@ async fn run_read_only(cli: &Cli, command: &Commands, endpoints: &[Endpoint]) ->
         _ => None,
     };
 
+    let filter = RowFilter::from_get(command).unwrap_or_default();
+    let show_labels = match command {
+        Commands::Get { show_labels, .. } => *show_labels,
+        _ => false,
+    };
+
     let Some(resource) = resource else {
+        // `drift` is not a resource listing but is still read-only: gather a
+        // per-endpoint report and combine them, exiting non-zero if any
+        // endpoint has drifted so a CI gate works across clusters.
+        if let Commands::Drift { output } = command {
+            return run_drift_fanout(cli, output, endpoints).await;
+        }
         // Not a resource listing (e.g. `system ping`); run per endpoint and
         // report outcomes so the user still sees which ones answered.
         let outcomes = for_each_endpoint(endpoints, |e| async move {
@@ -455,13 +474,14 @@ async fn run_read_only(cli: &Cli, command: &Commands, endpoints: &[Endpoint]) ->
         return Ok(());
     };
 
-    let groups = gather_rows(endpoints, resource, sort_by).await;
+    let resource = crate::cli::registry::resolve(&resource)?;
+    let groups = gather_rows(endpoints, resource, sort_by, &filter).await;
 
     if groups.is_empty() {
         anyhow::bail!("Every selected endpoint failed; see the errors above.");
     }
 
-    render_groups(groups, output)?;
+    render_groups(groups, output, show_labels, resource)?;
     Ok(())
 }
 
@@ -510,6 +530,52 @@ impl Rows {
         }
     }
 
+    /// Print `<kind>/<name>` for each row, for `-o name`.
+    ///
+    /// Uses the same traits `render_rows` uses, so the noun cannot drift from
+    /// the single-endpoint path.
+    fn print_names(&self, resource: ResourceType) {
+        macro_rules! names {
+            ($v:expr, $r:expr) => {{
+                for row in $v {
+                    println!("{}", crate::utils::printer::row_name_line(row, $r));
+                }
+            }};
+        }
+        match self {
+            Rows::Nodes(v) => names!(v, resource),
+            Rows::Services(v) => names!(v, resource),
+            Rows::Tasks(v) => names!(v, resource),
+            Rows::Networks(v) => names!(v, resource),
+            Rows::Secrets(v) => names!(v, resource),
+            Rows::Configs(v) => names!(v, resource),
+            Rows::Stacks(v) => names!(v, resource),
+        }
+    }
+
+    /// Print each row's labels, for `--show-labels`.
+    fn print_labels(&self) {
+        macro_rules! labels {
+            ($v:expr) => {{
+                use crate::models::RowLabels;
+                for row in $v {
+                    if !row.labels().is_empty() {
+                        println!("  Labels: {}", row.labels());
+                    }
+                }
+            }};
+        }
+        match self {
+            Rows::Nodes(v) => labels!(v),
+            Rows::Services(v) => labels!(v),
+            Rows::Tasks(v) => labels!(v),
+            Rows::Networks(v) => labels!(v),
+            Rows::Secrets(v) => labels!(v),
+            Rows::Configs(v) => labels!(v),
+            Rows::Stacks(v) => labels!(v),
+        }
+    }
+
     fn to_json(&self) -> serde_json::Value {
         macro_rules! j {
             ($v:expr) => {
@@ -553,6 +619,7 @@ async fn gather_rows(
     endpoints: &[Endpoint],
     resource: crate::cli::root::ResourceType,
     sort_by: Option<String>,
+    filter: &RowFilter,
 ) -> Vec<(String, Rows)> {
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
     let mut handles = Vec::with_capacity(endpoints.len());
@@ -560,33 +627,36 @@ async fn gather_rows(
     for endpoint in endpoints.iter().cloned() {
         let semaphore = std::sync::Arc::clone(&semaphore);
         let sort_by = sort_by.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = semaphore.acquire_owned().await;
+        handles.push(tokio::spawn({
+            let filter = filter.clone();
+            async move {
+                let _permit = semaphore.acquire_owned().await;
 
-            let result = tokio::time::timeout(
-                ENDPOINT_TIMEOUT,
-                fetch_rows(&endpoint, resource, sort_by.clone()),
-            )
-            .await;
+                let result = tokio::time::timeout(
+                    ENDPOINT_TIMEOUT,
+                    fetch_rows(&endpoint, resource, sort_by.clone(), &filter),
+                )
+                .await;
 
-            match result {
-                Err(_) => {
-                    eprintln!(
-                        "[{}] timed out after {}s",
-                        endpoint.name,
-                        ENDPOINT_TIMEOUT.as_secs()
-                    );
-                    None
-                }
-                Ok(Err(e)) => {
-                    eprintln!("[{}] {}", endpoint.name, e);
-                    None
-                }
-                Ok(Ok(mut rows)) => {
-                    if let Some(path) = sort_by.clone() {
-                        rows.sort(&path);
+                match result {
+                    Err(_) => {
+                        eprintln!(
+                            "[{}] timed out after {}s",
+                            endpoint.name,
+                            ENDPOINT_TIMEOUT.as_secs()
+                        );
+                        None
                     }
-                    Some((endpoint.name.clone(), rows))
+                    Ok(Err(e)) => {
+                        eprintln!("[{}] {}", endpoint.name, e);
+                        None
+                    }
+                    Ok(Ok(mut rows)) => {
+                        if let Some(path) = sort_by.clone() {
+                            rows.sort(&path);
+                        }
+                        Some((endpoint.name.clone(), rows))
+                    }
                 }
             }
         }));
@@ -608,11 +678,69 @@ async fn gather_rows(
     groups
 }
 
+/// The filters `--endpoints` fan-out carries from the `get` invocation.
+///
+/// Fan-out used to extract only `sort_by`, so `--selector`, `--field-selector`
+/// and `NAME` were parsed by clap and then discarded — meaning
+/// `--endpoints a,b get services -l app=web` silently returned every service.
+#[derive(Clone, Default)]
+pub struct RowFilter {
+    pub selector: Option<String>,
+    pub field_selector: Option<String>,
+    pub name: Option<String>,
+}
+
+impl RowFilter {
+    /// Read the filter set out of a `get` invocation.
+    fn from_get(command: &crate::cli::root::Commands) -> Option<Self> {
+        use crate::cli::root::Commands;
+        match command {
+            Commands::Get {
+                selector,
+                field_selector,
+                name,
+                ..
+            } => Some(Self {
+                selector: selector.clone(),
+                field_selector: field_selector.clone(),
+                name: name.first().cloned(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Keep only the row matching `NAME`.
+    ///
+    /// Applied to rows rather than to the API query, so one implementation
+    /// covers every kind regardless of where its name field lives.
+    fn filter_rows<T: Named>(&self, rows: Vec<T>) -> Vec<T> {
+        let Some(want) = &self.name else {
+            return rows;
+        };
+        rows.into_iter().filter(|r| &r.row_name() == want).collect()
+    }
+
+    /// Apply the fan-out selectors to one kind of API object.
+    fn keep<T: serde::Serialize>(
+        &self,
+        items: Vec<T>,
+        labels: impl Fn(&T) -> Option<HashMap<String, String>>,
+    ) -> Vec<T> {
+        keep_matching(
+            items,
+            labels,
+            self.selector.as_ref(),
+            self.field_selector.as_ref(),
+        )
+    }
+}
+
 /// Fetch one resource kind from one endpoint.
 async fn fetch_rows(
     endpoint: &Endpoint,
     resource: crate::cli::root::ResourceType,
     _sort_by: Option<String>,
+    filter: &RowFilter,
 ) -> Result<Rows> {
     use crate::cli::root::ResourceType;
 
@@ -620,33 +748,62 @@ async fn fetch_rows(
     let docker = client.inner();
 
     Ok(match resource {
-        ResourceType::Nodes => Rows::Nodes(crate::cli::rows::node_typed_rows(
-            &crate::api::node::list_nodes(docker).await?,
-        )),
-        ResourceType::Services => Rows::Services(
-            crate::cli::rows::service_typed_rows(
-                docker,
-                &crate::api::service::list_services(docker).await?,
-            )
-            .await?,
-        ),
-        ResourceType::Tasks => {
-            let tasks = crate::api::task::list_tasks(docker).await?;
-            let names = crate::cli::rows::node_hostnames(docker).await;
-            Rows::Tasks(crate::cli::rows::task_typed_rows(&tasks, &names))
+        ResourceType::Nodes => {
+            let nodes = filter.keep(
+                crate::api::node::list_nodes(docker).await?,
+                |n: &bollard::models::Node| n.spec.as_ref().and_then(|s| s.labels.clone()),
+            );
+            Rows::Nodes(filter.filter_rows(crate::cli::rows::node_typed_rows(&nodes)))
         }
-        ResourceType::Networks => Rows::Networks(crate::cli::rows::network_typed_rows(
-            &crate::api::network::list_networks(docker).await?,
-        )),
-        ResourceType::Secrets => Rows::Secrets(crate::cli::rows::secret_typed_rows(
-            &crate::api::secret::list_secrets(docker).await?,
-        )),
-        ResourceType::Configs => Rows::Configs(crate::cli::rows::config_typed_rows(
-            &crate::api::config::list_configs(docker).await?,
-        )),
-        ResourceType::Stacks => Rows::Stacks(crate::cli::rows::stack_typed_rows(
-            &crate::api::stack::list_stacks(docker).await?,
-        )),
+        ResourceType::Services => {
+            let services = filter.keep(
+                crate::api::service::list_services(docker).await?,
+                |s: &bollard::models::Service| s.spec.as_ref().and_then(|sp| sp.labels.clone()),
+            );
+            let rows = crate::cli::rows::service_typed_rows(docker, &services).await?;
+            Rows::Services(filter.filter_rows(rows))
+        }
+        ResourceType::Tasks => {
+            let tasks = filter.keep(
+                crate::api::task::list_tasks(docker).await?,
+                |t: &bollard::models::Task| {
+                    t.spec
+                        .as_ref()
+                        .and_then(|s| s.container_spec.as_ref())
+                        .and_then(|c| c.labels.clone())
+                },
+            );
+            let names = crate::cli::rows::node_hostnames(docker).await;
+            let rows = crate::cli::rows::task_typed_rows(&tasks, &names);
+            Rows::Tasks(filter.filter_rows(rows))
+        }
+        ResourceType::Networks => {
+            let networks = filter.keep(
+                crate::api::network::list_networks(docker).await?,
+                |n: &bollard::models::Network| n.labels.clone(),
+            );
+            Rows::Networks(filter.filter_rows(crate::cli::rows::network_typed_rows(&networks)))
+        }
+        ResourceType::Secrets => {
+            let secrets = filter.keep(
+                crate::api::secret::list_secrets(docker).await?,
+                |s: &bollard::models::Secret| s.spec.as_ref().and_then(|sp| sp.labels.clone()),
+            );
+            Rows::Secrets(filter.filter_rows(crate::cli::rows::secret_typed_rows(&secrets)))
+        }
+        ResourceType::Configs => {
+            let configs = filter.keep(
+                crate::api::config::list_configs(docker).await?,
+                |c: &bollard::models::Config| c.spec.as_ref().and_then(|sp| sp.labels.clone()),
+            );
+            Rows::Configs(filter.filter_rows(crate::cli::rows::config_typed_rows(&configs)))
+        }
+        ResourceType::Stacks => {
+            let stacks = crate::api::stack::list_stacks(docker).await?;
+            // Stacks carry no labels and no id, so only NAME can filter them.
+            let rows = crate::cli::rows::stack_typed_rows(&stacks);
+            Rows::Stacks(filter.filter_rows(rows))
+        }
     })
 }
 
@@ -654,6 +811,8 @@ async fn fetch_rows(
 fn render_groups(
     groups: Vec<(String, Rows)>,
     output: crate::cli::root::OutputFormat,
+    show_labels: bool,
+    resource: ResourceType,
 ) -> Result<()> {
     use crate::cli::root::OutputFormat;
 
@@ -674,17 +833,112 @@ fn render_groups(
                 .collect();
             crate::utils::printer::print_yaml(&serde_json::Value::Object(map))?;
         }
-        _ => {
+        OutputFormat::Name => {
+            // Names only, one per line across all endpoints. Previously this
+            // fell into the `_` arm and printed whole sectioned tables, so
+            // `--endpoints a,b get services -o name` could not be piped.
+            for (_name, rows) in &groups {
+                rows.print_names(resource);
+            }
+        }
+        OutputFormat::Table | OutputFormat::Wide => {
             for (name, rows) in groups {
                 println!("=== {} ===", name);
                 if rows.is_empty() {
                     println!("(no resources)");
                 } else {
                     rows.print_table();
+                    if show_labels {
+                        rows.print_labels();
+                    }
                 }
                 println!();
             }
         }
+        // The payload formats need per-endpoint object envelopes; the fan-out
+        // path merges already-built rows, so say so rather than printing a
+        // sectioned table that cannot be parsed.
+        other => anyhow::bail!(
+            "-o {} is not supported across --endpoints; use table, wide, json, \
+             yaml or name",
+            other.as_arg()
+        ),
+    }
+    Ok(())
+}
+
+/// Run `drift` against every endpoint and combine the reports.
+///
+/// Each endpoint gets its own drift report; a failing endpoint reports its
+/// error without hiding the others' results. Exits 1 when any endpoint has
+/// drifted, so `drift --endpoints a,b && deploy` gates on all clusters.
+async fn run_drift_fanout(
+    cli: &Cli,
+    output: &Option<crate::cli::root::OutputFormat>,
+    endpoints: &[Endpoint],
+) -> Result<()> {
+    use crate::cli::root::OutputFormat;
+
+    let format = output.clone().unwrap_or_else(|| cli.output.clone());
+
+    // Collected directly rather than through `for_each_endpoint`, whose
+    // outcome type discards the payload: the drift text is the result here.
+    let mut any_drifted = false;
+    let mut failures = 0usize;
+
+    for endpoint in endpoints {
+        let client = match connect(endpoint) {
+            Ok(client) => client,
+            Err(e) => {
+                eprintln!("{}: error: {}", endpoint.name, e);
+                failures += 1;
+                continue;
+            }
+        };
+
+        let report = match crate::cli::drift::drift_services(&client, &endpoint.name).await {
+            Ok(report) => report,
+            Err(e) => {
+                eprintln!("{}: error: {}", endpoint.name, e);
+                failures += 1;
+                continue;
+            }
+        };
+
+        match format {
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&crate::cli::drift::report_to_json(
+                        &endpoint.name,
+                        &report
+                    ))?
+                );
+            }
+            OutputFormat::Yaml => {
+                println!(
+                    "{}",
+                    serde_yaml::to_string(&crate::cli::drift::report_to_json(
+                        &endpoint.name,
+                        &report
+                    ))?
+                );
+            }
+            _ => {
+                let text = crate::cli::drift::render_report(&endpoint.name, &report);
+                print!("{}", text);
+                if !report.is_clean() {
+                    any_drifted = true;
+                }
+            }
+        }
+    }
+
+    if failures > 0 && failures == endpoints.len() {
+        anyhow::bail!("Every selected endpoint failed; see the errors above.");
+    }
+    if any_drifted {
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -719,17 +973,8 @@ async fn run_mutating(cli: &Cli, command: Commands, endpoints: &[Endpoint]) -> R
     })
     .await;
 
-    println!();
-    println!("Results:");
-    for outcome in &outcomes {
-        let status = if outcome.ok { "ok" } else { "FAILED" };
-        let detail = outcome.error.clone().unwrap_or_default();
-        println!(
-            "  {:<6} {:<20} {:>6}ms  {}",
-            status, outcome.endpoint, outcome.duration_ms, detail
-        );
-    }
-
+    // `report_outcomes` prints the table. Printing it here as well meant any
+    // partial failure produced two identical "Results:" tables.
     let failures = report_outcomes(&outcomes);
     if failures > 0 {
         anyhow::bail!(

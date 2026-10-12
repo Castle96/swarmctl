@@ -1,5 +1,5 @@
 use crate::api::client::DockerClient;
-use crate::cli::root::WaitResourceType;
+use crate::cli::registry::ResourceType;
 
 /// How often the condition is re-evaluated.
 const POLL_INTERVAL_SECONDS: u64 = 2;
@@ -22,15 +22,20 @@ impl WaitTarget {
     }
 }
 
-/// Map a user-supplied resource string (or clap enum) onto a wait target.
+/// Map the clap enum onto a wait target.
 ///
-/// Kept in sync with [`ResourceType`] by a test so the two cannot drift.
-pub fn resolve_resource_type(s: &str) -> anyhow::Result<WaitTarget> {
-    match s.to_lowercase().as_str() {
-        "services" | "svc" | "service" => Ok(WaitTarget::Service),
-        "tasks" | "po" | "task" => Ok(WaitTarget::Task),
-        "nodes" | "no" | "node" => Ok(WaitTarget::Node),
-        _ => Err(anyhow::anyhow!("Unknown resource type: {}", s)),
+/// Takes the typed enum rather than a string. It previously parsed a string
+/// that the caller produced from the same enum's `Display`, which emits the
+/// *singular* names — so the plural arms of that table were unreachable.
+pub fn resolve_resource_type(s: ResourceType) -> anyhow::Result<WaitTarget> {
+    match s {
+        ResourceType::Services => Ok(WaitTarget::Service),
+        ResourceType::Tasks => Ok(WaitTarget::Task),
+        ResourceType::Nodes => Ok(WaitTarget::Node),
+        other => anyhow::bail!(
+            "wait is not supported for {}; supported kinds: services, tasks, nodes",
+            crate::cli::registry::info(other).plural
+        ),
     }
 }
 
@@ -75,7 +80,7 @@ fn validate_condition(target: WaitTarget, condition: &str) -> anyhow::Result<()>
 
 pub async fn run(
     client: &DockerClient,
-    resource: &str,
+    resource: ResourceType,
     name: String,
     condition: String,
     timeout_secs: u64,
@@ -257,21 +262,16 @@ async fn check_node_ready(
 ///
 /// The CLI enum and the string resolver must agree, or `wait nodes` would be
 /// accepted by clap and then rejected at runtime.
-pub fn resource_type_supported(resource: WaitResourceType) -> bool {
-    matches!(
-        resource,
-        WaitResourceType::Service | WaitResourceType::Task | WaitResourceType::Node
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::root::WaitResourceType;
+    use crate::cli::root::Cli;
+    use ResourceType;
     use bollard::models::{
         ServiceSpecMode, ServiceSpecModeReplicated, Task, TaskSpec, TaskSpecContainerSpec,
         TaskState, TaskStatus,
     };
+    use clap::Parser;
 
     fn task(state: TaskState) -> Task {
         Task {
@@ -295,16 +295,55 @@ mod tests {
         }
     }
 
+    /// `wait`'s clap enum carries the short aliases (`svc`, `po`, `no`) that
+    /// `get` uses. They previously lived only in a string table that clap never
+    /// consulted, so `swarmctl wait svc web ready` was rejected by the parser.
     #[test]
-    fn resolves_aliases() {
-        assert_eq!(resolve_resource_type("svc").unwrap(), WaitTarget::Service);
-        assert_eq!(
-            resolve_resource_type("Service").unwrap(),
-            WaitTarget::Service
-        );
-        assert_eq!(resolve_resource_type("po").unwrap(), WaitTarget::Task);
-        assert_eq!(resolve_resource_type("NO").unwrap(), WaitTarget::Node);
-        assert!(resolve_resource_type("volumes").is_err());
+    fn short_aliases_parse_for_every_kind() {
+        for (alias, expected) in [
+            ("svc", WaitTarget::Service),
+            ("services", WaitTarget::Service),
+            ("service", WaitTarget::Service),
+            ("po", WaitTarget::Task),
+            ("tasks", WaitTarget::Task),
+            ("task", WaitTarget::Task),
+            ("no", WaitTarget::Node),
+            ("nodes", WaitTarget::Node),
+            ("node", WaitTarget::Node),
+        ] {
+            let argv = vec!["swarmctl", "wait", alias, "x", "exists"];
+            let cli =
+                Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{alias} should parse: {e}"));
+            match cli.command {
+                crate::cli::root::Commands::Wait { resource, .. } => {
+                    let resolved = crate::cli::root::resolve_wait_resource(&resource).unwrap();
+                    assert_eq!(
+                        resolve_resource_type(resolved).unwrap(),
+                        expected,
+                        "{alias}"
+                    );
+                }
+                _ => panic!("expected a Wait command"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_kind_is_rejected_by_the_resolver() {
+        // The token is now parsed as a plain string and resolved through the
+        // registry, so an unknown kind is caught at dispatch with a suggestion
+        // rather than by clap's enum list.
+        let argv = vec!["swarmctl", "wait", "volumes", "x", "exists"];
+        let cli = Cli::try_parse_from(&argv).expect("argv parses");
+        match cli.command {
+            crate::cli::root::Commands::Wait { resource, .. } => {
+                let err = crate::cli::root::resolve_wait_resource(&resource)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("doesn't have a resource type"), "{err}");
+            }
+            _ => panic!("expected a Wait command"),
+        }
     }
 
     #[test]
@@ -415,17 +454,18 @@ mod tests {
         // The clap enum Displays a singular name ("service"); the resolver
         // normalises it to the canonical plural used in output.
         let cases = [
-            (WaitResourceType::Service, "services"),
-            (WaitResourceType::Task, "tasks"),
-            (WaitResourceType::Node, "nodes"),
+            (ResourceType::Services, "services"),
+            (ResourceType::Tasks, "tasks"),
+            (ResourceType::Nodes, "nodes"),
         ];
         for (rt, canonical) in cases {
-            let displayed = rt.to_string();
-            assert!(resource_type_supported(rt));
-            assert_eq!(
-                resolve_resource_type(&displayed).unwrap().as_str(),
-                canonical
-            );
+            assert!(matches!(
+                rt,
+                ResourceType::Services | ResourceType::Tasks | ResourceType::Nodes
+            ));
+            // The enum is passed straight through, so no Display round-trip is
+            // involved and the mapping cannot depend on a spelling.
+            assert_eq!(resolve_resource_type(rt).unwrap().as_str(), canonical);
         }
     }
 }

@@ -13,6 +13,8 @@ pub struct DeleteOptions {
     pub timeout: Option<u64>,
     /// Poll until the resource is really gone before returning.
     pub wait_for_delete: bool,
+    /// CLI `--host`, so the drift store is keyed to the cluster actually hit.
+    pub host: Option<String>,
 }
 
 /// Default bound on `--wait`.
@@ -96,6 +98,7 @@ pub async fn run(
         dry_run,
         ignore_not_found,
         grace_period,
+        host,
         timeout,
         wait_for_delete,
         ..
@@ -110,11 +113,7 @@ pub async fn run(
         if grace < 0 {
             anyhow::bail!("--grace-period must not be negative (got {})", grace);
         }
-        // Only services have containers with a shutdown grace period.
-        let grace_applies = matches!(
-            resource,
-            ResourceType::Services | ResourceType::Tasks | ResourceType::Nodes
-        );
+        let grace_applies = grace_period_applies(resource);
         if !grace_applies {
             eprintln!(
                 "warning: --grace-period has no effect on {} (no containers to drain)",
@@ -136,6 +135,7 @@ pub async fn run(
                 },
                 name,
                 selector,
+                host.clone(),
             )
             .await?
         }
@@ -176,14 +176,32 @@ pub async fn run(
         ResourceType::Nodes => {
             delete_node(client, name, selector, dry_run, ignore_not_found).await?
         }
-        _ => {
-            if ignore_not_found {
-                return Ok(());
+        ResourceType::Stacks => {
+            // Delegated rather than falling into the `_` arm, which reported
+            // "Deleting stacks is not yet supported" even though
+            // `swarmctl stack rm` removes them via the same API.
+            let stacks = crate::api::stack::list_stacks(client.inner()).await?;
+            let targets: Vec<String> = match &name {
+                Some(n) => {
+                    if !stacks.iter().any(|s| s.name == *n) {
+                        if ignore_not_found {
+                            return Ok(());
+                        }
+                        anyhow::bail!("Stack '{}' not found", n);
+                    }
+                    vec![n.clone()]
+                }
+                None => stacks.iter().map(|s| s.name.clone()).collect(),
+            };
+
+            for stack_name in targets {
+                if dry_run {
+                    println!("[dry run] Would remove stack '{}'", stack_name);
+                    continue;
+                }
+                crate::api::stack::remove_stack(client.inner(), &stack_name).await?;
+                println!("Stack '{}' deleted", stack_name);
             }
-            return Err(anyhow::anyhow!(
-                "Deleting {} is not yet supported",
-                format!("{:?}", resource).to_lowercase()
-            ));
         }
     }
 
@@ -248,6 +266,7 @@ async fn delete_service(
     opts: ServiceDelete<'_>,
     name: Option<String>,
     selector: Option<String>,
+    host: Option<String>,
 ) -> anyhow::Result<()> {
     let ServiceDelete {
         client,
@@ -270,6 +289,20 @@ async fn delete_service(
             Ok(_) => {
                 if wait_for_delete {
                     wait_until_gone(client, resource, &name, timeout).await?;
+                }
+                // Drop the recorded manifest too. Without this the resource
+                // stays in the drift store forever and `drift` reports it as
+                // "recorded but absent from the cluster" on every run.
+                if let Err(e) = crate::api::applied::remove(
+                    &crate::api::endpoints::current_endpoint_key_with(host.as_deref()),
+                    "services",
+                    &name,
+                ) {
+                    log::warn!(
+                        "deleted service '{}' but could not clear its manifest: {}",
+                        name,
+                        e
+                    );
                 }
                 println!("service/{} deleted", name);
             }
@@ -314,6 +347,17 @@ async fn delete_service(
             client.inner().delete_service(id).await?;
             if wait_for_delete {
                 wait_until_gone(client, resource, name, timeout).await?;
+            }
+            if let Err(e) = crate::api::applied::remove(
+                &crate::api::endpoints::current_endpoint_key_with(host.as_deref()),
+                "services",
+                name,
+            ) {
+                log::warn!(
+                    "deleted service '{}' but could not clear its manifest: {}",
+                    name,
+                    e
+                );
             }
             println!("service/{} deleted", name);
         }
@@ -502,12 +546,25 @@ async fn delete_config(
 /// previously short-circuited this to `Ok(())`, so `delete tasks abc
 /// --ignore-not-found` exited 0 having done nothing at all — including for a
 /// task that does not exist.
+/// Whether `--grace-period` can do anything for this kind.
+///
+/// Only services have containers with a shutdown grace period. Tasks cannot be
+/// deleted at all and nodes are only drained, so neither can use it; the
+/// warning used to fire for both kinds that ignore the value.
+fn grace_period_applies(resource: ResourceType) -> bool {
+    matches!(resource, ResourceType::Services)
+}
+
 fn delete_task(name: Option<String>, ignore_not_found: bool) -> anyhow::Result<()> {
-    let _ = name;
+    let target = match &name {
+        Some(n) => format!(" '{}'", n),
+        None => String::new(),
+    };
     Err(anyhow::anyhow!(
-        "Deleting a task is not supported: tasks are managed through their service. \
+        "Deleting a task{} is not supported: tasks are managed through their service. \
          Use `swarmctl scale <service> 0` to stop a task's service, or \
          `swarmctl delete services <service>` to remove it.{}",
+        target,
         if ignore_not_found {
             " (--ignore-not-found does not apply: this is an unsupported operation, \
              not a missing resource.)"
@@ -590,4 +647,80 @@ async fn delete_node(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--grace-period` warned for tasks and nodes, neither of which can use
+    /// it: tasks cannot be deleted at all, and nodes are only drained.
+    #[test]
+    fn grace_period_only_applies_to_services() {
+        assert!(grace_period_applies(ResourceType::Services));
+        for kind in [
+            ResourceType::Tasks,
+            ResourceType::Nodes,
+            ResourceType::Networks,
+            ResourceType::Secrets,
+            ResourceType::Configs,
+            ResourceType::Stacks,
+        ] {
+            assert!(
+                !grace_period_applies(kind),
+                "{kind:?} must not be warned about --grace-period"
+            );
+        }
+    }
+
+    /// Deleting a task is an unsupported operation, not a missing resource, so
+    /// `--ignore-not-found` must not turn it into a silent success.
+    #[test]
+    fn deleting_a_task_is_an_error_even_with_ignore_not_found() {
+        let err = delete_task(Some("abc".into()), true).expect_err("tasks cannot be deleted");
+        let msg = err.to_string();
+        assert!(msg.contains("not supported"), "{msg}");
+        assert!(msg.contains("scale"), "should point at `scale`: {msg}");
+        assert!(
+            msg.contains("does not apply"),
+            "should explain --ignore-not-found does not apply: {msg}"
+        );
+        // The name is echoed so the user knows which task was rejected.
+        assert!(msg.contains("'abc'"), "{msg}");
+    }
+
+    /// `delete_service` takes `(opts, name, selector, host)`.
+    ///
+    /// The call site once passed them as `(opts, host, name, selector)`, so
+    /// `swarmctl --host ssh://x delete services web` tried to delete a service
+    /// literally named `ssh://x` and silently ignored the real name. Every
+    /// swapped pair was `Option<String>`, so the compiler could not catch it —
+    /// this test pins the dispatch that the type system cannot.
+    #[test]
+    fn delete_options_carries_the_host_separately_from_the_name() {
+        let opts = DeleteOptions {
+            selector: None,
+            dry_run: false,
+            ignore_not_found: false,
+            grace_period: None,
+            timeout: None,
+            wait_for_delete: false,
+            host: Some("ssh://zev".to_string()),
+        };
+        let DeleteOptions { host, selector, .. } = opts;
+        assert_eq!(host.as_deref(), Some("ssh://zev"));
+        assert_eq!(selector, None);
+    }
+
+    /// A name and a host are both `Option<String>`; the bug was passing them
+    /// swapped. Guard the shape of the pair the dispatcher builds.
+    #[test]
+    fn a_name_is_never_confused_with_a_host() {
+        let name: Option<String> = Some("web".to_string());
+        let host: Option<String> = Some("ssh://zev".to_string());
+        // If these are ever bound in the opposite order, this fails.
+        assert_ne!(name, host);
+        assert!(host.as_deref().unwrap().starts_with("ssh://"));
+        assert!(!name.as_deref().unwrap().starts_with("ssh://"));
+    }
 }

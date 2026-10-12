@@ -1,35 +1,57 @@
 use crate::api::client::DockerClient;
+use crate::cli::root::ResourceType;
 use std::collections::HashMap;
 
 pub async fn run(
     client: &DockerClient,
-    resource: &str,
+    resource: ResourceType,
     name: String,
     labels: Vec<String>,
     overwrite: bool,
     delete_all: bool,
 ) -> anyhow::Result<()> {
-    let resource_type = resolve_resource_type(resource)?;
-
-    match resource_type {
-        "services" => update_service_labels(client, &name, labels, overwrite, delete_all).await?,
-        "nodes" => update_node_labels(client, &name, labels, overwrite, delete_all).await?,
-        "secrets" => update_secret_labels(client, &name, labels, overwrite, delete_all).await?,
-        "configs" => update_config_labels(client, &name, labels, overwrite, delete_all).await?,
-        _ => return Err(anyhow::anyhow!("label is not supported for {}", resource)),
+    // The typed enum is passed straight through, so the alias table that used
+    // to live here (and whose singular arms were unreachable, since the caller
+    // stringified the enum with its plural `Display`) is gone.
+    match resource {
+        ResourceType::Services => {
+            update_service_labels(client, &name, labels, overwrite, delete_all).await?
+        }
+        ResourceType::Nodes => {
+            update_node_labels(client, &name, labels, overwrite, delete_all).await?
+        }
+        ResourceType::Secrets => {
+            update_secret_labels(client, &name, labels, overwrite, delete_all).await?
+        }
+        ResourceType::Configs => {
+            update_config_labels(client, &name, labels, overwrite, delete_all).await?
+        }
+        other => {
+            return Err(anyhow::anyhow!(
+                "label is not supported for {}. Labellable kinds: services, nodes, \
+                 secrets, configs.",
+                other
+            ));
+        }
     }
 
     Ok(())
 }
 
-fn resolve_resource_type(s: &str) -> anyhow::Result<&'static str> {
-    match s.to_lowercase().as_str() {
-        "services" | "svc" | "service" => Ok("services"),
-        "nodes" | "no" | "node" => Ok("nodes"),
-        "secrets" | "sec" | "secret" => Ok("secrets"),
-        "configs" | "cm" | "config" => Ok("configs"),
-        _ => Err(anyhow::anyhow!("Unknown resource type: {}", s)),
-    }
+/// Require the API id of an object addressed by name.
+///
+/// Docker's update endpoints take an ID. The object was just looked up by name,
+/// so a missing ID means the daemon returned something unexpected; say so
+/// rather than sending a request that will fail opaquely.
+fn require_id(id: &Option<String>, kind: &str, name: &str) -> anyhow::Result<String> {
+    id.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} '{}' has no id, so it cannot be updated. The daemon returned a \
+             response without one.",
+            kind,
+            name
+        )
+    })
 }
 
 fn parse_labels(labels: &[String]) -> HashMap<String, String> {
@@ -159,7 +181,10 @@ async fn update_secret_labels(
     let opts = bollard::query_parameters::UpdateSecretOptionsBuilder::default()
         .version(version)
         .build();
-    client.inner().update_secret(name, spec, opts).await?;
+    // The Engine API addresses secrets by ID, not by name. Passing `name` here
+    // meant the request 404'd unless the two happened to be equal.
+    let id = require_id(&secret.id, "Secret", name)?;
+    client.inner().update_secret(&id, spec, opts).await?;
 
     let label_count = new_labels.len();
     println!("Secret '{}' labels updated ({} labels)", name, label_count);
@@ -199,7 +224,9 @@ async fn update_config_labels(
     let opts = bollard::query_parameters::UpdateConfigOptionsBuilder::default()
         .version(version)
         .build();
-    client.inner().update_config(name, spec, opts).await?;
+    // The Engine API addresses configs by ID, not by name.
+    let id = require_id(&config.id, "Config", name)?;
+    client.inner().update_config(&id, spec, opts).await?;
 
     let label_count = new_labels.len();
     println!("Config '{}' labels updated ({} labels)", name, label_count);

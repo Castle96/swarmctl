@@ -12,8 +12,9 @@ scriptable control over a Swarm cluster without hand-rolling `curl` against
 ## Features
 
 - **Inspect** — nodes, services, tasks, networks, secrets, configs, stacks, volumes
-- **Select and filter** — `--selector` (labels), `--field-selector`, `--sort-by`, `-A`
-- **Output** — `table` (default), `json`, `yaml`, `wide`, `name`
+- **Select and filter** — `-l/--selector` (full set-based grammar), `--field-selector`, `--sort-by`
+- **Output** — `table` (default), `json`, `yaml`, `wide`, `name`, `jsonpath`, `custom-columns`, `go-template`
+- **kubectl-style addressing** — `TYPE/NAME`, comma-separated types, `.VERSION` qualifiers, and a `kind`/`apiVersion`/`metadata`/`spec`/`status` envelope in every machine format
 - **Declarative** — `apply`, `replace`, `patch`, `diff`, `edit`
 - **Operate** — `scale`, `rollout`, `exec`, `attach`, `logs`, `cp`, `port-forward`, `top`, `events`, `wait`
 - **Node lifecycle** — `cordon`, `uncordon`, `drain`, `taint`, `promote`, `demote`
@@ -142,6 +143,55 @@ Exits `0` when the clusters match and `1` when they differ or a side was
 unreachable, so it can gate a deployment. Tasks are not comparable: their ids
 are per-run, so every cluster would look wholly different.
 
+### Drift detection
+
+`apply` records the manifest it submits, and `drift` compares the live cluster
+against those records. This is the question Swarm otherwise cannot answer:
+whether what is running is still what you asked for.
+
+```bash
+swarmctl apply -f web.yml          # records the manifest
+swarmctl drift                     # compare live state against the records
+swarmctl drift -o json             # machine-readable, for CI
+swarmctl drift --endpoints prod-eu,prod-us   # check several clusters at once
+```
+
+```
+prod-eu: 1 resource(s) drifted
+~ service web
+      TaskTemplate.ContainerSpec.Image: nginx:1.25 -> nginx:1.27
+```
+
+Two things drift reports that a plain `get` cannot:
+
+- **Drifted** — the field no longer matches the manifest. Usually an image tag
+  that was repointed by a push, or a replica count edited by hand.
+- **Missing** — recorded in the store but gone from the cluster.
+
+Resources running with no recorded manifest are listed as untracked; that is a
+fact about the store rather than drift, so it does not affect the exit code.
+
+`drift` exits `0` when every recorded resource matches and `1` when anything has
+drifted, so `drift && deploy.sh` gates a pipeline on declared state being true.
+It needs no `apply` history to be meaningful — but only resources you have
+applied through swarmctl are tracked, so start by re-applying the services you
+want watched.
+
+Server-assigned fields (`Version`, `CreatedAt`, `UpdateStatus`, `ForceUpdate`,
+node bookkeeping) are never reported: no manifest reproduces them, so including
+them would bury the real change in noise.
+
+To stop tracking, `swarmctl drift forget` clears the current endpoint's records
+and `swarmctl drift forget --all` clears every endpoint's. Retiring a cluster
+otherwise leaves `drift` reporting its resources as missing forever.
+
+```bash
+swarmctl drift forget              # this endpoint
+swarmctl drift forget prod-eu      # one named endpoint
+swarmctl drift forget --all        # every endpoint with recorded state
+```
+
+
 ### Docker interoperability
 
 `endpoint add --sync` writes a real Docker context (directory `sha256(name)`,
@@ -170,14 +220,14 @@ See [Local vault](#local-vault).
 
 | Group | Commands |
 |---|---|
-| Read | `get`, `describe`, `explain`, `api-resources`, `top`, `logs`, `events`, `ports`, `cluster-info`, `system` |
+| Read | `get`, `describe`, `explain`, `api-resources`, `top`, `logs`, `events`, `ports`, `cluster-info`, `system`, `drift` |
 | Write | `create`, `apply`, `replace`, `patch`, `edit`, `delete`, `scale`, `run` |
 | Operate | `exec`, `attach`, `cp`, `port-forward`, `rollout`, `wait` |
 | Nodes | `cordon`, `uncordon`, `drain`, `taint`, `label`, `set`, `promote`, `demote` |
 | Swarm | `swarm init\|join\|leave\|token\|status` |
 | Cluster config | `stack`, `config`, `volume`, `context`, `vault`, `failover` |
 | Endpoints | `endpoint` (`add`/`ls`/`rm`/`inspect`/`health`/`import`/`use`/`sync`) |
-| Multi-cluster | `diff-clusters`, plus `--endpoints` on any command |
+| Multi-cluster | `diff-clusters`, `drift`, plus `--endpoints` on any command |
 | Meta | `version`, `completion`, `help` |
 
 ### Global flags
@@ -186,11 +236,11 @@ Accepted before or after the subcommand.
 
 | Flag | Purpose |
 |---|---|
-| `-o, --output` | `table` (default), `json`, `yaml`, `wide`, `name`. Machine formats suppress the connection banner so output stays pipeable. |
+| `-o, --output` | `table` (default), `wide`, `json`, `yaml`, `name`, `jsonpath=EXPR`, `jsonpath-as-json=EXPR`, `go-template=EXPR`, `custom-columns=SPEC`. Machine formats suppress the connection banner so output stays pipeable. |
 | `-w, --watch` | Re-render periodically. Only `get` acts on it. |
 | `--host` | Daemon address; also read from `$DOCKER_HOST`. |
-| `-c, --context` | Docker context; also read from `$DOCKER_CONTEXT`. Takes precedence over `--host`. |
-| `--tlscacert`, `--tlscert`, `--tlskey` | TLS material. All three are required together. |
+| `--context` | Docker context; also read from `$DOCKER_CONTEXT`. **Conflicts with `--host`** rather than silently overriding it. |
+| `--tlscacert`, `--tlscert`, `--tlskey` | TLS material. All three are required together. Ignored with a warning when `--context` is also set, because a context carries its own TLS settings. |
 | `--endpoints` | Run against named endpoints. See [Fan-out](#fan-out). |
 | `-y, --yes` | Assume yes for write fan-out. Required in non-interactive use. |
 | `-v` | Verbosity (repeatable). |
@@ -199,10 +249,14 @@ Accepted before or after the subcommand.
 
 | Command | Flag | Purpose |
 |---|---|---|
-| `get` | `--selector` | Label selector, `key=value` |
-| `get` | `--field-selector` | Field selector against the raw API object |
-| `get` | `--sort-by` | Sort by a row field; numerics sort numerically |
+| `get` | `-l, --selector` | Label selector: `key=value`, `key==v`, `key!=v`, `key`, `!key`, `key in (a,b)`, `key notin (a,b)`. Comma-separated terms are ANDed. |
+| `get` | `--field-selector` | Field selector against the object envelope (same paths as `--sort-by` and `-o jsonpath`) |
+| `get` | `--sort-by` | Order by a jsonpath expression; numerics sort numerically, ties keep input order |
+| `get` | `-L, --label-columns` | Append label values as extra columns |
+| `get` | `--no-headers` | Omit the table header |
+| `get` | `--show-kind` | Prefix `-o name` output with the resource type |
 | `get` | `--show-labels` | Print labels after each row |
+| `get` | `TYPE/NAME` | Address one object inline: `get svc/mcp_fetch` |
 | `delete` | `--dry-run` | Report what would be deleted |
 | `delete` | `--selector` | Delete everything matching a label |
 | `delete` | `--ignore-not-found` | Exit 0 when already absent. Does not apply to `delete tasks`, which is unsupported outright. |
@@ -277,35 +331,66 @@ previously it produced an empty range and a cheerful "No available ports".
 
 ### Resource types
 
-`get` and `describe` accept these, with short names:
+Every spelling in a row below resolves to the same resource, so `get nodes`,
+`get node`, `get Node` and `get no` are equivalent.
 
-| Resource | Short |
-|---|---|
-| `nodes` | `no` |
-| `services` | `svc` |
-| `tasks` | `po` |
-| `networks` | `net` |
-| `secrets` | `sec` |
-| `configs` | `cm` |
-| `stacks` | `st` |
+| Resource | Short | Kind | Short names |
+|---|---|---|---|
+| `nodes` | `no` | `Node` | `no` |
+| `services` | `svc` | `Service` | `svc` |
+| `tasks` | `po` | `Task` | `po` |
+| `networks` | `net` | `Network` | `net` |
+| `secrets` | `sec` | `Secret` | `sec` |
+| `configs` | `cm` | `Config` | `cm` |
+| `stacks` | `st` | `Stack` | `st` |
+
+`swarmctl explain` with no argument prints this table with every accepted
+spelling; `swarmctl api-resources` prints it with the API version negotiated
+against the connected daemon.
+
+The kubectl argument grammar applies:
+
+```bash
+swarmctl get svc                  # one type, all objects
+swarmctl get svc,no               # comma-separated types
+swarmctl get svc/mcp_fetch        # TYPE/NAME
+swarmctl get svc web api          # names as positional arguments
+swarmctl get services.v1.52       # .VERSION qualifier, checked against the API version
+swarmctl get services.v1.apps     # error: Swarm has no API groups
+swarmctl get servics              # "Did you mean this? services"
+```
 
 ## Usage
 
 ### Selecting and sorting
 
 ```bash
-swarmctl get services --selector app=web         # label selector
-swarmctl get nodes --field-selector availability=active
-swarmctl get services --sort-by .replicas        # numeric fields sort numerically
-swarmctl get services --watch                    # re-render every 2s
+swarmctl get services -l app=web                        # equality
+swarmctl get services -l 'app!=web'                     # not-equal
+swarmctl get nodes    -l role                           # key exists
+swarmctl get nodes    -l '!role'                        # key does not exist
+swarmctl get nodes    -l 'role in (worker,edge)'        # set membership
+swarmctl get nodes    -l 'role notin (worker)'          # set exclusion
+swarmctl get nodes    -l 'role=edge,zone=prod'          # comma = AND
+swarmctl get nodes --field-selector spec.availability=active
+swarmctl get nodes --sort-by '{.metadata.name}'
+swarmctl get services --watch                           # re-render every 2s
 swarmctl get services --show-labels
 ```
 
-`--field-selector` and `--sort-by` address fields of the **rendered row**, not
-the raw Docker API object — the same fields shown in table output. Run
-`swarmctl explain <resource>` for the list per resource type. Paths may be
-written with or without a leading dot (`.replicas` and `replicas` are
-equivalent).
+`--selector`, `--field-selector` and `--sort-by` all address the **same object
+envelope** described in [Object envelope](#object-envelope), so one set of path
+names works for all three. Run `swarmctl explain <resource>` for the documented
+paths per resource type.
+
+A malformed selector is an **error**, reported before any API call:
+
+```
+$ swarmctl get nodes -l 'role in nope'
+Error: --selector: set operator in "role in nope" needs parentheses, e.g. key in (a,b)
+```
+
+This used to match zero rows and look exactly like an empty cluster.
 
 `--watch` and `--output` are global, so they work before or after the
 subcommand: `swarmctl --watch get services` and `swarmctl get services --watch`
@@ -320,10 +405,63 @@ last 30 seconds".
 
 ```bash
 swarmctl get services -o table   # default; aligned columns
+swarmctl get services -o wide    # table plus labels
 swarmctl get services -o json
 swarmctl get services -o yaml
-swarmctl get services -o wide    # extra columns
 swarmctl get services -o name    # bare resource names, for piping
+swarmctl get services -o name --show-kind
+
+swarmctl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.state}{"\n"}{end}'
+swarmctl get nodes -o jsonpath-as-json='{.items[*].metadata.name}'
+swarmctl get nodes -o custom-columns='NAME:.metadata.name,ADDR:.status.addr'
+swarmctl get nodes -o go-template='{range .items[*]}{.metadata.name}{"\n"}{end}'
+
+swarmctl get nodes -o custom-columns='NAME:.metadata.name' -L role --no-headers
+```
+
+### Object envelope
+
+Every machine format serializes a Kubernetes-shaped object rather than
+Bollard's raw structs:
+
+```console
+$ swarmctl get nodes -o json | jq '.items[0]'
+{
+  "apiVersion": "v1.52",
+  "kind": "Node",
+  "metadata": {
+    "name": "zev",
+    "labels": { "role": "orchestrator" },
+    "uid": "zfthk15sat72zfa68krnxjkmj",
+    "creationTimestamp": "2026-09-30T17:03:06.32103471Z"
+  },
+  "spec":   { "availability": "active", "labels": { "role": "orchestrator" } },
+  "status": { "state": "ready", "addr": "100.119.129.40" }
+}
+```
+
+This is what makes `--field-selector metadata.name=zev`, `--sort-by
+'{.metadata.name}'` and `-o jsonpath={.metadata.name}` work at all. Raw Docker
+keys are Go-style and capitalized (`Spec.Availability`), which is why the
+`spec`/`status` bodies are camelCased and the swarm-specific identity is kept
+under `dockerId`.
+
+Services additionally expose `metadata.stack`, taken from the
+`com.docker.stack.namespace` label — Swarm's closest equivalent to a namespace.
+
+#### jsonpath
+
+The evaluator covers the subset kubectl users actually write: field access,
+`[0]` / `[-1]` indexes, `[*]` wildcards, `..name` recursive descent,
+`{.a,.b}` unions, `[?(@.field=="x")]` filters, `{range …}{end}` blocks (which
+nest), and `{"\t"}` string escapes.
+
+Slices (`[0:2]`) are not supported and are reported as such rather than
+silently resolving to nothing.
+
+```bash
+swarmctl get services -o jsonpath='{.items[*].spec.taskTemplate.containerSpec.image}'
+swarmctl get tasks -o jsonpath='{range .items[*]}{.status.state}{"\n"}{end}' | sort | uniq -c
 ```
 
 ### Stacks
@@ -336,8 +474,20 @@ swarmctl stack rm my-stack
 
 ### Connecting to a remote host
 
-Resolution order: `--context` → `--host` / `$DOCKER_HOST` → active Docker
-context → local socket.
+Resolution order: `--context` / `$DOCKER_CONTEXT` → `--host` / `$DOCKER_HOST`
+→ active Docker context → `$DOCKER_TLS_VERIFY` + `$DOCKER_CERT_PATH` → local
+socket.
+
+`--context` and `--host` together are a **conflict**, not a precedence rule:
+
+```console
+$ swarmctl --context prod --host tcp://10.0.0.5:2375 get nodes
+Error: cannot combine --context prod with --host: a context already names a daemon. Drop one, or use --host alone.
+```
+
+A context used to win silently, discarding `--host` and every `--tls*` flag, so
+a command line could name one daemon and swarmctl would connect to another.
+An empty `$DOCKER_CONTEXT` is treated as unset.
 
 ```bash
 # Local socket (default)
@@ -453,9 +603,14 @@ swarmctl completion powershell | Out-String | Invoke-Expression
 | `DOCKER_CERT_PATH` | Directory holding `ca.pem`/`cert.pem`/`key.pem` | `~/.docker` |
 | `RUST_LOG` | Log level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
 
-Resolution order is `--context`, then `$DOCKER_CONTEXT`, then `--host`/
-`$DOCKER_HOST`, then the active Docker context, then the local socket — matching
-Docker's own precedence, so `swarmctl` and `docker` always agree on the target.
+Resolution order is `--context`, then `$DOCKER_CONTEXT`, then `--host`,
+`$DOCKER_HOST`, then the active Docker context, then `$DOCKER_TLS_VERIFY` with
+`$DOCKER_CERT_PATH`, then the local socket — matching Docker's own precedence, so
+`swarmctl` and `docker` agree on the target.
+
+A flag always beats its own environment variable: `--host` overrides
+`DOCKER_HOST`. Combining `--context` with `--host` is rejected rather than
+resolved.
 
 ## Architecture
 
@@ -467,6 +622,8 @@ src/
 │   ├── endpoints.rs named endpoint registry + Docker context sync
 │   ├── health.rs    endpoint reachability probing
 │   ├── diff.rs      cross-cluster comparison
+│   ├── specdiff.rs  structured field-aware resource comparison
+│   ├── applied.rs   last-applied manifest store (drift)
 │   ├── node.rs service.rs task.rs network.rs secret.rs config.rs stack.rs
 │   ├── swarm.rs     swarm lifecycle (init/join/leave/token)
 │   ├── volume.rs    volume operations
@@ -476,17 +633,29 @@ src/
 │   ├── context.rs   Docker context read/write
 │   └── docker_check.rs  daemon reachability and config paths
 ├── cli/             clap command definitions and handlers
+│   ├── registry.rs  the resource table: names, short names, kind, grammar
+│   ├── kobject.rs   Docker object -> kind/apiVersion/metadata/spec/status
 │   ├── rows.rs      shared API-object -> display-row builders
 │   ├── fanout.rs    running one command against several endpoints
+│   └── drift.rs     drift detection and `drift forget`
 ├── models/          display-oriented row structs (tabled + serde)
 ├── tui/             ratatui dashboard and port visualizer
 ├── vault/           encrypted local token storage, keyed by endpoint
-└── utils/           table/JSON/YAML printing, selectors, state paths
+└── utils/           printing, jsonpath, selectors, state paths
 ```
 
 The layers are deliberately separate: `api/` knows about Bollard types,
 `models/` knows about presentation, and `cli/`/`tui/` are the only things that
 print. Swapping the TUI or adding an output format does not touch the API layer.
+
+Two invariants are load-bearing and worth stating outright:
+
+- **`cli::registry` is the only place a resource is named.** Short names,
+  singulars, `kind`, `TYPE/NAME`, comma lists and `.VERSION` qualifiers all
+  resolve through it, so `explain`, `api-resources` and the parser cannot
+  disagree about what exists.
+- **`cli::kobject` is the only object serializer.** Every machine format, and
+  every `--field-selector` and `--sort-by` path, reads the same envelope.
 
 ## Development
 
@@ -519,13 +688,35 @@ smaller binary without `ratatui`/`crossterm`.
 - Resource lookup goes through `api::*::find_*`; row construction through
   `cli::rows`; duration parsing through `utils::time`. Each has one
   implementation so behaviour cannot drift between commands.
+- A list handler filters **typed** objects and keeps the serialized form in
+  step (`get::Filtered`), so display rows and rendered envelopes can never
+  describe different sets. Filtering the serialized side and then building
+  rows from the original list is the bug this replaced: `--field-selector`
+  worked for `-o json` and did nothing for `-o table`.
 
 ## Troubleshooting
 
 **`Cannot connect to the Docker daemon`**
-Docker is not running, or `DOCKER_HOST` points somewhere unreachable. Check with
+Docker is not running, or the resolved target is unreachable. Check with
 `docker info`, then `swarmctl system ping`. `swarmctl system info` prints the
 resolved connection target.
+
+**`cannot combine --context X with --host`**
+Both were supplied. A context already names a daemon, so drop one of them.
+
+**`the server doesn't have a resource type "servics"`**
+The spelling did not resolve. swarmctl suggests the nearest accepted spelling;
+`swarmctl explain` lists every spelling of every resource.
+
+**`--selector: set operator ... needs parentheses`**
+Set-based selectors need `key in (a,b)`, not `key in a,b`.
+
+**Reaching a cluster over a VPN/tailnet**
+`--host ssh://user@host` needs no TLS setup and is the safest option. It does
+require SSH access, and opens a connection per call, so it is slower than a
+native TCP endpoint. Note that a swarm node may expose the raft port (2377)
+while leaving the Engine API (2375/2376) closed — swarmctl needs the Engine
+API, so a reachable 2377 does not mean `swarmctl` can talk to it.
 
 **`This node is not a swarm manager`**
 Most operations require a manager. Verify with `swarmctl swarm status` and
@@ -554,8 +745,15 @@ Older builds required the flag before the subcommand. Current builds accept
 - [x] Endpoint health checks
 - [x] Read and write fan-out across endpoints
 - [x] Cross-cluster diff, with a CI-gateable exit code
+- [x] Drift detection: last-applied manifests, `drift`, `drift forget`
 - [x] Per-cluster credentials in the vault
+- [x] kubectl argument grammar: `TYPE/NAME`, comma lists, `.VERSION`, singular and `kind` spellings, typo suggestions
+- [x] Kubernetes-shaped object envelope shared by every machine format and path expression
+- [x] jsonpath and `custom-columns` output, `-L`, `--no-headers`, `--show-kind`
+- [x] Full set-based selector grammar with errors on malformed input
+- [x] `api-resources` probes the connected daemon instead of printing a constant
 - [ ] Integration test suite against a live swarm fixture
+- [ ] Drift tracking for configs, secrets, and networks (services only today)
 - [ ] Volume data migration (needs filesystem access to each node)
 - [ ] Release automation and packaged binaries
 

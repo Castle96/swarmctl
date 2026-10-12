@@ -2,28 +2,47 @@ use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, OsRng},
 };
-use argon2::Argon2;
 use rand::RngCore;
 use zeroize::Zeroize;
 
-use super::models::{NONCE_LEN, SALT_LEN};
+use super::models::{KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
 
-pub fn derive_key(password: &str, salt: &[u8]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    Argon2::default()
+/// Derive a key using explicitly recorded parameters.
+///
+/// Parameters are read from the vault envelope rather than the current default,
+/// so raising the cost in a future release cannot silently make an existing
+/// vault undecryptable.
+pub fn derive_key_with(
+    params: &KdfParams,
+    password: &str,
+    salt: &[u8],
+) -> anyhow::Result<[u8; KEY_LEN]> {
+    let mut key = [0u8; KEY_LEN];
+    params
+        .to_argon2()?
         .hash_password_into(password.as_bytes(), salt, &mut key)
-        .expect("argon2 key derivation failed");
-    key
+        .map_err(|e| anyhow::anyhow!("Argon2 key derivation failed: {}", e))?;
+    Ok(key)
 }
 
 pub fn encrypt(plaintext: &[u8], password: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    encrypt_with(&KdfParams::current(), plaintext, password)
+}
+
+/// [`encrypt`] with explicitly recorded KDF parameters, so the caller controls
+/// what gets written into the envelope.
+pub fn encrypt_with(
+    kdf: &KdfParams,
+    plaintext: &[u8],
+    password: &str,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let mut salt = vec![0u8; SALT_LEN];
     OsRng.fill_bytes(&mut salt);
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
 
-    let key = derive_key(password, &salt);
+    let key = derive_key_with(kdf, password, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| anyhow::anyhow!("Failed to create cipher: {}", e))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -38,13 +57,20 @@ pub fn encrypt(plaintext: &[u8], password: &str) -> anyhow::Result<(Vec<u8>, Vec
     Ok((salt, nonce_bytes.to_vec(), ciphertext))
 }
 
-pub fn decrypt(
+/// Decrypt with explicitly recorded KDF parameters.
+///
+/// Takes the parameters from the vault envelope rather than using the current
+/// default, so raising the cost in a future release cannot silently make an
+/// existing vault undecryptable.
+pub fn decrypt_with(
+    kdf: &KdfParams,
     salt: &[u8],
     nonce: &[u8],
     ciphertext: &[u8],
     password: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let key = derive_key(password, salt);
+    let key = derive_key_with(kdf, password, salt)
+        .map_err(|e| anyhow::anyhow!("key derivation failed: {}", e))?;
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| anyhow::anyhow!("Failed to create cipher: {}", e))?;
     let nonce = Nonce::from_slice(nonce);
@@ -62,6 +88,23 @@ pub fn decrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn derive_key(password: &str, salt: &[u8]) -> [u8; KEY_LEN] {
+        derive_key_with(&KdfParams::current(), password, salt).unwrap()
+    }
+
+    fn decrypt(
+        salt: &[u8],
+        nonce: &[u8],
+        ciphertext: &[u8],
+        password: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        decrypt_with(&KdfParams::current(), salt, nonce, ciphertext, password)
+    }
+
+    fn encrypt(plaintext: &[u8], password: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        encrypt_with(&KdfParams::current(), plaintext, password)
+    }
 
     #[test]
     fn roundtrip_recovers_plaintext() {

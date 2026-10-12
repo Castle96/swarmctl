@@ -1,3 +1,4 @@
+pub mod applied;
 pub mod client;
 pub mod config;
 pub mod context;
@@ -12,6 +13,7 @@ pub mod node;
 pub mod port;
 pub mod secret;
 pub mod service;
+pub mod specdiff;
 pub mod stack;
 pub mod swarm;
 pub mod task;

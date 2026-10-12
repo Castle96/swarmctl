@@ -36,30 +36,3 @@ pub async fn create_volume(
     };
     Ok(docker.create_volume(request).await?)
 }
-
-#[allow(dead_code)]
-pub async fn get_volume_mountpoints(
-    docker: &Docker,
-    volume_name: &str,
-) -> anyhow::Result<Vec<String>> {
-    let options = bollard::query_parameters::ListContainersOptions {
-        all: true,
-        ..Default::default()
-    };
-    let containers = docker.list_containers(Some(options)).await?;
-    let mut mountpoints = Vec::new();
-
-    for container in containers {
-        if let Some(mounts) = &container.mounts {
-            for mount in mounts {
-                if mount.name.as_deref() == Some(volume_name)
-                    && let Some(source) = &mount.source
-                {
-                    mountpoints.push(source.clone());
-                }
-            }
-        }
-    }
-
-    Ok(mountpoints)
-}

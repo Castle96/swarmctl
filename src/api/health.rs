@@ -11,11 +11,25 @@ use std::time::{Duration, Instant};
 /// How long a single endpoint gets to answer.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Probe several endpoints concurrently.
+/// How many endpoints are probed at once.
+///
+/// Each probe makes up to four sequential requests (ping, info, swarm inspect,
+/// node list), so an unbounded spawn opened four connections per endpoint: a
+/// registry of 100 endpoints meant 400 concurrent SSH or TLS sessions. Matches
+/// the fan-out path's cap so the three multi-cluster code paths agree.
+pub const MAX_CONCURRENT_PROBES: usize = 8;
+
+/// Probe several endpoints concurrently, bounded by [`MAX_CONCURRENT_PROBES`].
 pub async fn probe_all(endpoints: &[Endpoint]) -> Vec<EndpointHealth> {
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PROBES));
     let mut handles = Vec::with_capacity(endpoints.len());
     for endpoint in endpoints {
-        handles.push(tokio::spawn(probe(endpoint.clone())));
+        let semaphore = std::sync::Arc::clone(&semaphore);
+        let endpoint = endpoint.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = semaphore.acquire_owned().await;
+            probe(endpoint).await
+        }));
     }
 
     let mut results = Vec::with_capacity(handles.len());
@@ -248,6 +262,25 @@ mod tests {
 
     #[tokio::test]
     async fn probe_all_with_no_endpoints_is_empty() {
+        assert!(probe_all(&[]).await.is_empty());
+    }
+
+    /// Probes used to spawn one unbounded task per endpoint, and each probe
+    /// makes up to four requests, so a large registry opened hundreds of
+    /// simultaneous SSH/TLS sessions. The cap now matches fan-out's.
+    #[tokio::test]
+    async fn probe_all_respects_the_concurrency_cap() {
+        // Compile-time: a cap of zero would deadlock, and health and fan-out
+        // should not disagree on how many endpoints to contact at once.
+        const { assert!(MAX_CONCURRENT_PROBES > 0) };
+        const {
+            assert!(
+                MAX_CONCURRENT_PROBES <= crate::cli::fanout::MAX_CONCURRENT,
+                "health and fan-out disagree on the concurrency cap"
+            )
+        };
+
+        // An empty slice must not deadlock on the semaphore.
         assert!(probe_all(&[]).await.is_empty());
     }
 }

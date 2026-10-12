@@ -1,4 +1,6 @@
+use argon2::Argon2;
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Current vault format version.
 ///
@@ -8,17 +10,106 @@ pub const VAULT_VERSION: u32 = 2;
 
 pub const SALT_LEN: usize = 32;
 pub const NONCE_LEN: usize = 12;
+/// AES-256 key length.
+pub const KEY_LEN: usize = 32;
+
+/// Key-derivation cost parameters.
+///
+/// Recorded in the envelope so raising them cannot silently make an existing
+/// vault undecryptable: without this, `Argon2::default()` was baked into the
+/// code, and changing it later would have bricked every stored vault with no
+/// in-file way to detect it or migrate it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KdfParams {
+    /// Argon2 variant. Only `argon2id` is implemented.
+    pub algorithm: String,
+    /// Memory cost in kibibytes.
+    pub memory_kib: u32,
+    /// Time cost (passes).
+    pub iterations: u32,
+    /// Parallelism (lanes).
+    pub parallelism: u32,
+    /// Derived key length in bytes.
+    pub output_len: u32,
+}
+
+impl KdfParams {
+    /// The parameters this build uses, as Argon2's own defaults:
+    /// Argon2id, m=19456 KiB, t=2, p=1.
+    pub fn current() -> Self {
+        // Argon2's own published defaults, read from the crate rather than
+        // re-typed, so the recorded values cannot drift from what is used.
+        Self {
+            algorithm: "argon2id".to_string(),
+            memory_kib: argon2::Params::DEFAULT_M_COST,
+            iterations: argon2::Params::DEFAULT_T_COST,
+            parallelism: argon2::Params::DEFAULT_P_COST,
+            output_len: KEY_LEN as u32,
+        }
+    }
+
+    /// Build an Argon2 instance configured from these parameters.
+    ///
+    /// The recorded values are used rather than whatever the current default
+    /// happens to be, so a vault written with stronger or weaker settings keeps
+    /// opening with exactly the cost it was created at.
+    pub fn to_argon2(&self) -> anyhow::Result<Argon2<'static>> {
+        if self.algorithm != "argon2id" {
+            anyhow::bail!(
+                "Unsupported key derivation algorithm '{}'; this build only reads argon2id.",
+                self.algorithm
+            );
+        }
+        if self.output_len != KEY_LEN as u32 {
+            anyhow::bail!(
+                "Unsupported key length {}; this build derives {} bytes.",
+                self.output_len,
+                KEY_LEN
+            );
+        }
+        let params = argon2::Params::new(
+            self.memory_kib,
+            self.iterations,
+            self.parallelism,
+            Some(self.output_len as usize),
+        )
+        .map_err(|e| anyhow::anyhow!("Invalid KDF parameters: {}", e))?;
+        Ok(Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            params,
+        ))
+    }
+}
+
+impl Default for KdfParams {
+    fn default() -> Self {
+        Self::current()
+    }
+}
 
 /// The encrypted envelope written to disk.
+///
+/// Not zeroized: everything here is ciphertext or public parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultFile {
+    /// Payload schema version.
     pub version: u32,
+    /// Key-derivation parameters. Absent in vaults written before this field
+    /// existed, which implies [`KdfParams::current`] from that era.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kdf: Option<KdfParams>,
     pub salt: Vec<u8>,
     pub nonce: Vec<u8>,
     pub ciphertext: Vec<u8>,
 }
 
 /// Decrypted vault contents.
+///
+/// Zeroized on drop: these are the swarm join tokens, which grant
+/// manager-equivalent access to the cluster. The derived key and the password
+/// were already zeroized, so leaving the plaintext in ordinary heap
+/// allocations was the one gap in an otherwise careful design.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VaultData {
     #[serde(default)]
@@ -26,6 +117,20 @@ pub struct VaultData {
     /// Credentials keyed by endpoint name.
     #[serde(default)]
     pub endpoints: std::collections::BTreeMap<String, EndpointSecrets>,
+}
+
+// Hand-written because `zeroize` does not implement `Zeroize` for `BTreeMap`.
+// `LocalVault` calls this from its own `Drop`, which keeps these types movable
+// (no `Drop` impl of their own) while still scrubbing the secrets.
+impl Zeroize for VaultData {
+    fn zeroize(&mut self) {
+        self.created_at.zeroize();
+        for entry in self.endpoints.values_mut() {
+            entry.zeroize();
+        }
+        // Dropping the keys too; the values are zeroized above.
+        self.endpoints.clear();
+    }
 }
 
 impl VaultData {
@@ -131,8 +236,9 @@ fn sanitize(value: &str) -> String {
 
 /// Swarm join tokens for one cluster.
 ///
-/// These grant manager-equivalent access, which is why they live encrypted.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// These grant manager-equivalent access, which is why they live encrypted and
+/// why they are zeroized once the vault is dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct JoinTokens {
     #[serde(default)]
     pub worker: String,
@@ -168,6 +274,23 @@ pub struct EndpointSecrets {
     pub updated_at: String,
 }
 
+// Hand-written: `zeroize` has no `Zeroize` impl for `Vec<T>`.
+impl Zeroize for EndpointSecrets {
+    fn zeroize(&mut self) {
+        self.swarm_name.zeroize();
+        self.join_tokens.zeroize();
+        if let Some(key) = &mut self.unlock_key {
+            key.zeroize();
+        }
+        for node in &mut self.nodes {
+            node.zeroize();
+        }
+        self.nodes.clear();
+        self.docker_host.zeroize();
+        self.updated_at.zeroize();
+    }
+}
+
 impl EndpointSecrets {
     pub fn has_credentials(&self) -> bool {
         self.join_tokens.has_any() || self.unlock_key.is_some()
@@ -175,7 +298,10 @@ impl EndpointSecrets {
 }
 
 /// A node as recorded in the vault.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Not itself a secret, but zeroized along with its parent so the whole
+/// decrypted tree is covered by one `Zeroize` impl.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Zeroize)]
 pub struct NodeRecord {
     #[serde(default)]
     pub node_id: String,

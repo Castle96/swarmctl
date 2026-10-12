@@ -7,7 +7,7 @@ pub async fn run(
     resource: ResourceType,
     name: Option<String>,
     selector: Option<String>,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     if let Some(name) = name {
         match resource {
@@ -54,7 +54,7 @@ pub async fn run(
 }
 
 /// Render an already-fetched node.
-fn describe_node_object(node: &bollard::models::Node, output: OutputFormat) -> anyhow::Result<()> {
+fn describe_node_object(node: &bollard::models::Node, output: &OutputFormat) -> anyhow::Result<()> {
     match output {
         OutputFormat::Table => {
             let spec = node.spec.clone().unwrap_or_default();
@@ -119,6 +119,10 @@ fn describe_node_object(node: &bollard::models::Node, output: OutputFormat) -> a
             println!("Name:\t{}", spec.name.as_ref().unwrap_or(&"".to_string()));
             println!("ID:\t{}", node.id.as_ref().unwrap_or(&"".to_string()));
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())
@@ -127,7 +131,7 @@ fn describe_node_object(node: &bollard::models::Node, output: OutputFormat) -> a
 async fn describe_node(
     client: &DockerClient,
     name: &str,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     let nodes = crate::api::node::list_nodes(client.inner()).await?;
     let node = nodes
@@ -143,7 +147,7 @@ async fn describe_node(
 /// Render an already-fetched service.
 fn describe_service_object(
     service: &bollard::models::Service,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     match output {
         OutputFormat::Table => {
@@ -224,6 +228,10 @@ fn describe_service_object(
             println!("Name:\t{}", spec.name.as_ref().unwrap_or(&"".to_string()));
             println!("ID:\t{}", service.id.as_ref().unwrap_or(&"".to_string()));
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())
@@ -232,7 +240,7 @@ fn describe_service_object(
 async fn describe_service(
     client: &DockerClient,
     name: &str,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     let services = crate::api::service::list_services(client.inner()).await?;
     let service = services
@@ -245,7 +253,7 @@ async fn describe_service(
 async fn describe_task(
     client: &DockerClient,
     name: &str,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     let tasks = crate::api::task::list_tasks(client.inner()).await?;
     let task = tasks
@@ -301,6 +309,10 @@ async fn describe_task(
             println!("ID:\t{}", task.id.unwrap_or_default());
             println!("Name:\t{}", task.name.unwrap_or_default());
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())
@@ -309,7 +321,7 @@ async fn describe_task(
 async fn describe_network(
     client: &DockerClient,
     name: &str,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     let network = crate::api::network::find_network(client.inner(), name).await?;
 
@@ -333,6 +345,10 @@ async fn describe_network(
             println!("Name:\t{}", network.name.unwrap_or_default());
             println!("ID:\t{}", network.id.unwrap_or_default());
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())
@@ -341,7 +357,7 @@ async fn describe_network(
 async fn describe_secret(
     client: &DockerClient,
     name: &str,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     let secrets = crate::api::secret::list_secrets(client.inner()).await?;
     let secret = secrets
@@ -384,6 +400,10 @@ async fn describe_secret(
             );
             println!("ID:\t{}", secret.id.unwrap_or_default());
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())
@@ -392,7 +412,7 @@ async fn describe_secret(
 async fn describe_config(
     client: &DockerClient,
     name: &str,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     let configs = crate::api::config::list_configs(client.inner()).await?;
     let config = configs
@@ -435,6 +455,10 @@ async fn describe_config(
             );
             println!("ID:\t{}", config.id.unwrap_or_default());
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())
@@ -443,7 +467,7 @@ async fn describe_config(
 async fn describe_stack(
     client: &DockerClient,
     name: &str,
-    output: OutputFormat,
+    output: &OutputFormat,
 ) -> anyhow::Result<()> {
     let services = crate::api::stack::get_stack_services(client.inner(), name).await?;
 
@@ -488,6 +512,10 @@ async fn describe_stack(
             println!("Stack:\t{}", name);
             println!("Services:\t{}", services.len());
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())

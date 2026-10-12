@@ -13,20 +13,24 @@ pub async fn run(
     output: OutputFormat,
 ) -> anyhow::Result<()> {
     match resource {
-        ResourceType::Services => replace_service(client, filename, stdin, dry_run, force).await?,
+        ResourceType::Services => {
+            replace_service(client, filename, stdin, dry_run, force, output).await?
+        }
         ResourceType::Configs => {
             replace_config(client, filename, stdin, dry_run, force, output).await?
         }
         ResourceType::Secrets => {
             replace_secret(client, filename, stdin, dry_run, force, output).await?
         }
-        ResourceType::Networks => replace_network(client, filename, stdin, dry_run, force).await?,
-        ResourceType::Nodes => replace_node(client, filename, stdin, dry_run, force).await?,
+        ResourceType::Networks => {
+            replace_network(client, filename, stdin, dry_run, force, output).await?
+        }
+        // Returns an explanatory error naming the commands that do work.
+        // Reached from the `Nodes` arm, so it rejects rather than reporting a
+        // successful replace.
+        ResourceType::Nodes => replace_node()?,
         _ => {
-            return Err(anyhow::anyhow!(
-                "replace is not supported for {:?}",
-                resource
-            ));
+            return Err(anyhow::anyhow!("replace is not supported for {}", resource));
         }
     }
 
@@ -51,6 +55,7 @@ async fn replace_service(
     stdin: bool,
     dry_run: bool,
     force: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let content = read_spec_file(filename, stdin)?;
     let value: serde_json::Value = serde_json::from_str(&content)
@@ -82,28 +87,22 @@ async fn replace_service(
         if force {
             client.inner().delete_service(&service_name).await?;
             let result = client.inner().create_service(spec, None).await?;
-            println!(
-                "Service '{}' replaced (ID: {})",
-                service_name,
-                result.id.unwrap_or_default()
-            );
+            // Honours `-o json|yaml`; previously `--output` was dropped for
+            // services, so `replace services -f x.json -o json` printed prose.
+            report_created("Service", &service_name, &result, &output)?;
         } else {
             let opts = bollard::query_parameters::UpdateServiceOptionsBuilder::default()
                 .version(version)
                 .build();
-            client
+            let updated = client
                 .inner()
                 .update_service(&service_name, spec, opts, None)
                 .await?;
-            println!("Service '{}' replaced", service_name);
+            report_updated("Service", &service_name, &updated, &output)?;
         }
     } else {
         let result = client.inner().create_service(spec, None).await?;
-        println!(
-            "Service '{}' created (ID: {})",
-            service_name,
-            result.id.unwrap_or_default()
-        );
+        report_created("Service", &service_name, &result, &output)?;
     }
 
     Ok(())
@@ -243,6 +242,7 @@ async fn replace_network(
     stdin: bool,
     dry_run: bool,
     force: bool,
+    output: OutputFormat,
 ) -> anyhow::Result<()> {
     let content = read_spec_file(filename, stdin)?;
     let value: serde_json::Value = serde_json::from_str(&content)
@@ -272,30 +272,75 @@ async fn replace_network(
         if force {
             let id = existing.id.as_deref().unwrap_or(&network_name);
             client.inner().remove_network(id).await?;
-            client.inner().create_network(spec).await?;
-            println!("Network '{}' replaced", network_name);
+            let created = client.inner().create_network(spec).await?;
+            report_created("Network", &network_name, &created, &output)?;
         } else {
-            println!(
-                "Network '{}' already exists (use --force to replace)",
-                network_name
-            );
+            // Not an error: the network already exists. Report it in the
+            // requested format rather than always as prose.
+            report_updated(
+                "Network",
+                &network_name,
+                &serde_json::json!({
+                    "Id": existing.id,
+                    "Name": network_name,
+                    "replaced": false,
+                    "hint": "already exists; pass --force to replace",
+                }),
+                &output,
+            )?;
         }
     } else {
-        client.inner().create_network(spec).await?;
-        println!("Network '{}' created", network_name);
+        let created = client.inner().create_network(spec).await?;
+        report_created("Network", &network_name, &created, &output)?;
     }
 
     Ok(())
 }
 
-async fn replace_node(
-    _client: &DockerClient,
-    _filename: Option<String>,
-    _stdin: bool,
-    _dry_run: bool,
-    _force: bool,
-) -> anyhow::Result<()> {
+/// Nodes have no replace endpoint: the Engine API exposes update (patch) and
+/// label changes, but no way to swap a node's whole spec.
+///
+/// Takes no client, because it never dials the daemon — rejecting locally is
+/// the whole point, and it makes the behaviour testable.
+fn replace_node() -> anyhow::Result<()> {
     Err(anyhow::anyhow!(
-        "replace is not supported for nodes. Use 'swarmctl patch' or 'swarmctl label' instead."
+        "replace is not supported for nodes: the Docker API has no node replace \
+         endpoint. Use `swarmctl patch nodes <name> -p '<json>'` or \
+         `swarmctl label nodes <name> k=v`."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::root::OutputFormat;
+
+    /// Every kind that reports a `replace` result routes through these helpers,
+    /// so `replace services -f x.json -o json` prints JSON like
+    /// `replace secrets` does instead of prose. Before the fix, services,
+    /// networks and nodes dropped `--output` entirely.
+    #[test]
+    fn report_helpers_accept_every_output_format() {
+        let payload = serde_json::json!({"Id": "abc"});
+        for output in [
+            OutputFormat::Table,
+            OutputFormat::Wide,
+            OutputFormat::Json,
+            OutputFormat::Yaml,
+            OutputFormat::Name,
+        ] {
+            assert!(report_created("Service", "web", &payload, &output).is_ok());
+            assert!(report_updated("Service", "web", &payload, &output).is_ok());
+        }
+    }
+
+    /// Nodes have no replace endpoint. The error must say which commands do
+    /// work rather than a bare "unsupported".
+    #[test]
+    fn node_replace_error_points_at_the_working_commands() {
+        let err = replace_node().expect_err("nodes cannot be replaced");
+        let msg = err.to_string();
+        assert!(msg.contains("patch"), "should name `patch`: {msg}");
+        assert!(msg.contains("label"), "should name `label`: {msg}");
+    }
 }

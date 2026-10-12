@@ -1,74 +1,132 @@
+//! `diff <resource> <name> -f <file>`: compare a live resource against a file.
+//!
+//! This used to shell out to the system `diff -u` on fully serialized Bollard
+//! objects. Live objects carry server-assigned noise (`Version`, `CreatedAt`,
+//! `UpdateStatus`, node bookkeeping) that no manifest can reproduce, so every
+//! run printed a wall of false positives that buried the real change. The
+//! structured comparison reports only the fields a manifest can declare, so
+//! one printed line means one real difference.
+
 use crate::api::client::DockerClient;
+use crate::api::specdiff::compare_objects;
+use crate::cli::root::ResourceType;
+
+/// Kinds `diff` can compare.
+fn supported(resource: ResourceType) -> anyhow::Result<()> {
+    match resource {
+        ResourceType::Services
+        | ResourceType::Nodes
+        | ResourceType::Secrets
+        | ResourceType::Configs => Ok(()),
+        other => anyhow::bail!(
+            "diff is not supported for {}. Diffable kinds: services, nodes, \
+             secrets, configs.",
+            other
+        ),
+    }
+}
+
+/// The live object for a resource, as raw JSON.
+async fn live_object(
+    client: &DockerClient,
+    resource: ResourceType,
+    name: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let docker = client.inner();
+    let object = match resource {
+        ResourceType::Services => {
+            serde_json::to_value(crate::api::service::find_service(docker, name).await?)?
+        }
+        ResourceType::Nodes => {
+            serde_json::to_value(crate::api::node::find_node(docker, name).await?)?
+        }
+        ResourceType::Secrets => {
+            serde_json::to_value(crate::api::secret::find_secret(docker, name).await?)?
+        }
+        ResourceType::Configs => {
+            serde_json::to_value(crate::api::config::find_config(docker, name).await?)?
+        }
+        // Rejected by `supported` above.
+        _ => unreachable!("diff dispatch reached for {resource:?}"),
+    };
+    Ok(object)
+}
 
 pub async fn run(
     client: &DockerClient,
-    resource: &str,
+    resource: ResourceType,
     name: String,
     filename: String,
 ) -> anyhow::Result<()> {
-    let live_yaml = match resource {
-        "service" | "services" => {
-            let service = crate::api::service::find_service(client.inner(), &name).await?;
-            serde_yaml::to_string(&service)?
-        }
-        "node" | "nodes" => {
-            let node = crate::api::node::find_node(client.inner(), &name).await?;
-            serde_yaml::to_string(&node)?
-        }
-        "secret" | "secrets" => {
-            let secret = crate::api::secret::find_secret(client.inner(), &name).await?;
-            serde_yaml::to_string(&secret)?
-        }
-        "config" | "configs" => {
-            let config = crate::api::config::find_config(client.inner(), &name).await?;
-            serde_yaml::to_string(&config)?
-        }
-        _ => anyhow::bail!("Unsupported resource type: {}", resource),
-    };
+    supported(resource)?;
+    let live = live_object(client, resource, &name).await?;
 
-    let file_yaml = std::fs::read_to_string(&filename)?;
+    let content = std::fs::read_to_string(&filename)?;
+    let desired: serde_json::Value = serde_json::from_str(&content).or_else(|_| {
+        serde_yaml::from_str::<serde_json::Value>(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse {} as JSON or YAML: {}", filename, e))
+    })?;
 
-    let mut live_file = tempfile::NamedTempFile::new()?;
-    std::io::Write::write_all(&mut live_file, live_yaml.as_bytes())?;
+    let changes = compare_objects(&live, &desired);
 
-    let mut file_file = tempfile::NamedTempFile::new()?;
-    std::io::Write::write_all(&mut file_file, file_yaml.as_bytes())?;
-
-    let output = std::process::Command::new("diff")
-        .arg("-u")
-        .arg("--label")
-        .arg("live")
-        .arg(live_file.path())
-        .arg("--label")
-        .arg(&filename)
-        .arg(file_file.path())
-        .output()?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let differs = !output.status.success();
-
-    if !stdout.is_empty() {
-        print!("{}", stdout);
-    }
-    if !stderr.is_empty() {
-        eprintln!("{}", stderr);
-    }
-
-    // `diff` is only useful in a script if it follows the same convention as the
-    // system tool: 0 when the inputs match, 1 when they differ. It previously
-    // always exited 0, so `diff ... && deploy` passed on a mismatch.
-    if !differs {
+    if changes.is_empty() {
         println!("No differences");
         return Ok(());
     }
 
-    // A diff exit code of 2 means the tool itself failed (missing binary, bad
-    // arguments), which should not masquerade as "files differ".
-    if output.status.code() == Some(2) {
-        anyhow::bail!("`diff` exited with an error (code 2). Is the diff tool installed?");
+    println!(
+        "{} {} differs from {}:",
+        resource_label(resource),
+        name,
+        filename
+    );
+    for change in &changes {
+        println!("  {}: {} -> {}", change.path, change.live, change.desired);
     }
 
+    // Same convention as the system tool this replaced: 0 when the inputs
+    // match, 1 when they differ, so `diff ... && deploy` gates on the result.
     std::process::exit(1);
+}
+
+/// Lowercase singular label for a resource kind, for the header line.
+fn resource_label(resource: ResourceType) -> &'static str {
+    match resource {
+        ResourceType::Services => "service",
+        ResourceType::Nodes => "node",
+        ResourceType::Secrets => "secret",
+        ResourceType::Configs => "config",
+        _ => "resource",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diffable_kinds_are_accepted() {
+        for resource in [
+            ResourceType::Services,
+            ResourceType::Nodes,
+            ResourceType::Secrets,
+            ResourceType::Configs,
+        ] {
+            assert!(supported(resource).is_ok(), "{resource:?} should diff");
+        }
+    }
+
+    #[test]
+    fn tasks_cannot_be_diffed() {
+        let err = supported(ResourceType::Tasks).unwrap_err().to_string();
+        assert!(err.contains("not supported"), "got: {err}");
+    }
+
+    #[test]
+    fn resource_labels_are_lowercase_singular() {
+        assert_eq!(resource_label(ResourceType::Services), "service");
+        assert_eq!(resource_label(ResourceType::Nodes), "node");
+        assert_eq!(resource_label(ResourceType::Secrets), "secret");
+        assert_eq!(resource_label(ResourceType::Configs), "config");
+    }
 }

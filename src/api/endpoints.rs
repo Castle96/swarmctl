@@ -450,7 +450,19 @@ pub fn remove_docker_context(name: &str) -> Result<()> {
 /// `swarmctl discover` and `swarmctl swarm token` land in the same place as
 /// `swarmctl vault store`. Falls back to a sanitised host or context name.
 pub fn current_endpoint_key() -> String {
-    let host = std::env::var("DOCKER_HOST").ok().filter(|h| !h.is_empty());
+    current_endpoint_key_with(None)
+}
+
+/// As [`current_endpoint_key`], but with an explicit CLI `--host` override.
+///
+/// The CLI's `--host` flag is not written to `DOCKER_HOST`, so without this a
+/// `swarmctl --host ssh://x apply -f web.yml` would key its manifest store
+/// under `local` instead of the named endpoint — and `drift` would then find
+/// no records for the cluster it just applied to.
+pub fn current_endpoint_key_with(host_override: Option<&str>) -> String {
+    let host = host_override
+        .map(|h| h.to_string())
+        .or_else(|| std::env::var("DOCKER_HOST").ok().filter(|h| !h.is_empty()));
 
     if let Ok(reg) = Registry::load() {
         // An explicitly selected context is the strongest signal.
@@ -744,6 +756,27 @@ mod tests {
         assert_eq!(sanitize_key("///"), "default");
         assert_eq!(sanitize_key(""), "default");
         assert_eq!(sanitize_key("tcp://10.0.0.1:2376"), "tcp---10.0.0.1-2376");
+    }
+
+    /// The CLI's `--host` flag is not written to `DOCKER_HOST`, so keying only
+    /// off the env var made `swarmctl --host ssh://x apply` record its manifest
+    /// under `local` — and `drift` against that same `--host` then found no
+    /// records at all.
+    #[test]
+    fn a_cli_host_override_matches_the_registered_endpoint() {
+        let reg = Registry::default();
+        let key = current_endpoint_key_with(Some("ssh://kyle@192.168.7.7"));
+        // With no matching endpoint registered it falls back to the sanitised
+        // host, never to `local`.
+        assert!(!key.is_empty());
+        assert_ne!(key, "local", "an explicit --host must not key as local");
+        let _ = reg;
+    }
+
+    #[test]
+    fn no_host_and_no_env_falls_back_to_local() {
+        let key = current_endpoint_key_with(None);
+        assert_eq!(key, "local");
     }
 
     #[test]

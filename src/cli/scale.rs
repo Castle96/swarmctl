@@ -23,8 +23,10 @@ pub async fn run(client: &DockerClient, name: &str, replicas: u64) -> anyhow::Re
     }
 
     // Update the service
+    // `unwrap().unwrap()` panicked whenever the daemon omitted either field.
+    // Version 0 is what every other update path already assumes.
     let options = bollard::query_parameters::UpdateServiceOptions {
-        version: service.version.unwrap().index.unwrap() as i32,
+        version: service.version.and_then(|v| v.index).unwrap_or(0) as i32,
         ..Default::default()
     };
 

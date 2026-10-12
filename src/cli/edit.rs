@@ -1,27 +1,49 @@
 use crate::api::client::DockerClient;
+use crate::cli::root::ResourceType;
 use anyhow::Context;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow::Result<()> {
+/// Kinds `edit` can round-trip through an editor.
+fn supported(resource: ResourceType) -> anyhow::Result<()> {
+    match resource {
+        ResourceType::Services
+        | ResourceType::Nodes
+        | ResourceType::Secrets
+        | ResourceType::Configs => Ok(()),
+        other => anyhow::bail!(
+            "edit is not supported for {}. Editable kinds: services, nodes, \
+             secrets, configs.",
+            other
+        ),
+    }
+}
+
+pub async fn run(
+    client: &DockerClient,
+    resource: ResourceType,
+    name: String,
+) -> anyhow::Result<()> {
+    supported(resource)?;
     let yaml = match resource {
-        "service" | "services" => {
+        ResourceType::Services => {
             let service = crate::api::service::find_service(client.inner(), &name).await?;
             serde_yaml::to_string(&service)?
         }
-        "node" | "nodes" => {
+        ResourceType::Nodes => {
             let node = crate::api::node::find_node(client.inner(), &name).await?;
             serde_yaml::to_string(&node)?
         }
-        "secret" | "secrets" => {
+        ResourceType::Secrets => {
             let secret = crate::api::secret::find_secret(client.inner(), &name).await?;
             serde_yaml::to_string(&secret)?
         }
-        "config" | "configs" => {
+        ResourceType::Configs => {
             let config = crate::api::config::find_config(client.inner(), &name).await?;
             serde_yaml::to_string(&config)?
         }
-        _ => anyhow::bail!("Unsupported resource type for edit: {}", resource),
+        // Rejected by `supported` above.
+        _ => unreachable!("edit dispatch reached for {resource:?}"),
     };
 
     let mut tmp = NamedTempFile::new()?;
@@ -56,7 +78,7 @@ pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow:
     }
 
     match resource {
-        "service" | "services" => {
+        ResourceType::Services => {
             let parsed: bollard::models::Service = serde_yaml::from_str(&edited)?;
             let version = parsed.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i32;
             let spec = parsed.spec.unwrap_or_default();
@@ -68,7 +90,7 @@ pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow:
                 .update_service(&name, spec, opts, None)
                 .await?;
         }
-        "node" | "nodes" => {
+        ResourceType::Nodes => {
             let parsed: bollard::models::Node = serde_yaml::from_str(&edited)?;
             let version = parsed.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
             let spec = parsed.spec.unwrap_or_default();
@@ -77,7 +99,7 @@ pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow:
                 .build();
             client.inner().update_node(&name, spec, opts).await?;
         }
-        "secret" | "secrets" => {
+        ResourceType::Secrets => {
             let parsed: bollard::models::Secret = serde_yaml::from_str(&edited)?;
             // Update in place. Deleting first and re-creating meant a failed
             // create lost the secret entirely.
@@ -94,7 +116,7 @@ pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow:
                 .update_secret(&id, parsed.spec.unwrap_or_default(), opts)
                 .await?;
         }
-        "config" | "configs" => {
+        ResourceType::Configs => {
             let parsed: bollard::models::Config = serde_yaml::from_str(&edited)?;
             let existing = crate::api::config::find_config(client.inner(), &name).await?;
             let id = existing
@@ -109,7 +131,8 @@ pub async fn run(client: &DockerClient, resource: &str, name: String) -> anyhow:
                 .update_config(&id, parsed.spec.unwrap_or_default(), opts)
                 .await?;
         }
-        _ => unreachable!(),
+        // Rejected by `supported` above.
+        _ => unreachable!("edit dispatch reached for {resource:?}"),
     }
 
     println!("{} '{}' updated", resource, name);

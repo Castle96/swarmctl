@@ -2,7 +2,9 @@ pub mod crypto;
 pub mod models;
 
 use anyhow::{Context, Result};
-use models::{EndpointSecrets, JoinTokens, LegacyVaultData, VAULT_VERSION, VaultData, VaultFile};
+use models::{
+    EndpointSecrets, JoinTokens, KdfParams, LegacyVaultData, VAULT_VERSION, VaultData, VaultFile,
+};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroize;
 
@@ -15,6 +17,11 @@ pub struct LocalVault {
     path: PathBuf,
     data: VaultData,
     password: String,
+    /// Key-derivation parameters this vault was written with.
+    ///
+    /// Carried rather than recomputed on every save, so a vault keeps opening
+    /// with the cost it was created at even if the default changes.
+    kdf: KdfParams,
 }
 
 impl LocalVault {
@@ -67,6 +74,7 @@ impl LocalVault {
             path: path.to_path_buf(),
             data,
             password: password.to_string(),
+            kdf: KdfParams::current(),
         };
         vault.save()?;
         Ok(vault)
@@ -90,25 +98,51 @@ impl LocalVault {
         let envelope: VaultFile = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
 
-        let plaintext = crypto::decrypt(
+        // A vault written by a newer swarmctl must be refused rather than
+        // reinterpreted. `Registry::load_from` already does this.
+        if envelope.version > VAULT_VERSION {
+            anyhow::bail!(
+                "{} was written by a newer swarmctl (format v{}, this build supports v{}). \
+                 Upgrade swarmctl to read it.",
+                path.display(),
+                envelope.version,
+                VAULT_VERSION
+            );
+        }
+
+        // Vaults written before the KDF was recorded used this build's defaults.
+        let kdf = envelope.kdf.unwrap_or_default();
+
+        let mut plaintext = crypto::decrypt_with(
+            &kdf,
             &envelope.salt,
             &envelope.nonce,
             &envelope.ciphertext,
             password,
         )
-        .map_err(|_| {
+        .map_err(|e| {
+            // Keep the KDF explanation only when that is what failed.
             anyhow::anyhow!(
-                "Could not decrypt the vault. Wrong password? ({} has not been modified.)",
+                "{}. ({}) has not been modified.",
+                if e.to_string().contains("key derivation") {
+                    "This vault's key-derivation parameters are not supported"
+                } else {
+                    "Could not decrypt the vault. Wrong password?"
+                },
                 path.display()
             )
         })?;
 
         let (data, migrated) = decode_payload(&plaintext, path)?;
+        // The decrypted join tokens are the sensitive material; scrub the
+        // serialized copy once the structured data exists.
+        plaintext.zeroize();
 
         let vault = Self {
             path: path.to_path_buf(),
             data,
             password: password.to_string(),
+            kdf,
         };
 
         if migrated {
@@ -128,6 +162,9 @@ impl LocalVault {
         let (salt, nonce, ciphertext) = crypto::encrypt(&plaintext, &self.password)?;
         let envelope = VaultFile {
             version: VAULT_VERSION,
+            // Recorded so a future change to the KDF cannot silently make
+            // existing vaults undecryptable.
+            kdf: Some(self.kdf.clone()),
             salt,
             nonce,
             ciphertext,
@@ -142,7 +179,8 @@ impl LocalVault {
         &self.data
     }
 
-    #[allow(dead_code)]
+    /// Mutable access to the decrypted store, used by the tests to seed state.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn data_mut(&mut self) -> &mut VaultData {
         &mut self.data
     }
@@ -183,14 +221,18 @@ impl LocalVault {
     /// Replace only the tokens, keeping other recorded metadata.
     pub fn rotate_tokens(&mut self, endpoint: &str, tokens: JoinTokens) -> Result<()> {
         let entry = self.data.get(endpoint).cloned().unwrap_or_default();
-        self.data.store(
-            endpoint,
-            EndpointSecrets {
-                updated_at: epoch_now(),
-                join_tokens: tokens,
-                ..entry
-            },
-        );
+        // Spelled out rather than using `..entry`: `EndpointSecrets` has a
+        // `Drop` impl (to zeroize), and struct update syntax cannot move fields
+        // out of a type that implements Drop.
+        let rotated = EndpointSecrets {
+            updated_at: epoch_now(),
+            join_tokens: tokens,
+            swarm_name: entry.swarm_name,
+            unlock_key: entry.unlock_key,
+            nodes: entry.nodes,
+            docker_host: entry.docker_host,
+        };
+        self.data.store(endpoint, rotated);
         self.save()
     }
 
@@ -210,10 +252,11 @@ impl LocalVault {
         if result.is_err() {
             // Keep the old password so the caller can retry rather than being
             // left unable to save.
-            self.password = previous;
-        } else {
-            previous.zeroize();
+            self.password = std::mem::take(&mut previous);
         }
+        // Zeroized on both paths. The old copy used to survive the failure
+        // branch, leaving the previous password in an ordinary heap string.
+        previous.zeroize();
         result
     }
 
@@ -228,6 +271,7 @@ impl LocalVault {
         self.save()
     }
 
+    /// Aggregate vault state for `vault status` / `vault ls`.
     pub fn status(&self) -> models::VaultStatus {
         models::VaultStatus {
             created_at: self.data.created_at.clone(),
@@ -282,6 +326,11 @@ impl std::fmt::Debug for LocalVault {
 impl Drop for LocalVault {
     fn drop(&mut self) {
         self.password.zeroize();
+        // The decrypted join tokens and the manager unlock key live in `data`
+        // for the whole lifetime of the vault. The derived key and the password
+        // were already being scrubbed, so leaving the plaintext was the one gap
+        // in an otherwise careful design.
+        self.data.zeroize();
     }
 }
 
@@ -345,6 +394,23 @@ mod tests {
         LocalVault::create_at(&LocalVault::at(tmp), password).unwrap()
     }
 
+    /// A vault holding one endpoint with both tokens set.
+    fn populated_vault_at(tmp: &Path, password: &str) -> LocalVault {
+        let mut v = vault_at(tmp, password);
+        v.store_swarm_tokens(
+            "prod",
+            JoinTokens {
+                worker: "W-token".into(),
+                manager: "M-token".into(),
+            },
+            Some("SWMKEY-1-abc".into()),
+            "tcp://10.0.0.1:2376",
+            "prod",
+        )
+        .unwrap();
+        v
+    }
+
     fn legacy_payload() -> Vec<u8> {
         serde_json::to_vec(&LegacyVaultData {
             created_at: "111".into(),
@@ -370,6 +436,8 @@ mod tests {
         let (salt, nonce, ciphertext) = crypto::encrypt(&legacy_payload(), password).unwrap();
         let envelope = VaultFile {
             version: 1,
+            // Absent, as vaults written before the KDF was recorded.
+            kdf: None,
             salt,
             nonce,
             ciphertext,
@@ -425,6 +493,162 @@ mod tests {
         let err = LocalVault::open_at(&path, "wrong").unwrap_err().to_string();
         assert!(err.contains("Wrong password"), "got: {err}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// The KDF parameters are recorded in the envelope so a future change to
+    /// the cost cannot silently make every existing vault undecryptable.
+    #[test]
+    fn kdf_parameters_are_recorded_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = LocalVault::at(tmp.path());
+        populated_vault_at(tmp.path(), "pw");
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let envelope: VaultFile = serde_json::from_str(&raw).unwrap();
+        let kdf = envelope.kdf.expect("kdf params must be recorded");
+
+        assert_eq!(kdf.algorithm, "argon2id");
+        assert_eq!(kdf.output_len, 32);
+        // Argon2's defaults, recorded rather than assumed.
+        assert_eq!(kdf.memory_kib, argon2::Params::DEFAULT_M_COST);
+        assert_eq!(kdf.iterations, argon2::Params::DEFAULT_T_COST);
+        assert_eq!(kdf.parallelism, argon2::Params::DEFAULT_P_COST);
+    }
+
+    /// A vault written without the recorded KDF must still open, using the
+    /// current defaults — otherwise every pre-existing vault would be lost.
+    #[test]
+    fn a_vault_without_recorded_kdf_still_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = LocalVault::at(tmp.path());
+        populated_vault_at(tmp.path(), "pw");
+
+        // Strip the field, as vaults written before it existed would look.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: VaultFile = serde_json::from_str(&raw).unwrap();
+        envelope.kdf = None;
+        std::fs::write(&path, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
+
+        let v = LocalVault::open_at(&path, "pw").expect("must still open");
+        assert!(v.data().has_any());
+    }
+
+    /// A vault written with *different* KDF parameters must still open, since
+    /// the recorded values — not the current defaults — are used to derive.
+    #[test]
+    fn non_default_kdf_parameters_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = LocalVault::at(tmp.path());
+        populated_vault_at(tmp.path(), "pw");
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let envelope: VaultFile = serde_json::from_str(&raw).unwrap();
+
+        // Re-encrypt with cheaper parameters, and record them.
+        let cheap = KdfParams {
+            memory_kib: 64,
+            iterations: 1,
+            parallelism: 1,
+            ..KdfParams::current()
+        };
+        let plaintext = crypto::decrypt_with(
+            envelope.kdf.as_ref().unwrap(),
+            &envelope.salt,
+            &envelope.nonce,
+            &envelope.ciphertext,
+            "pw",
+        )
+        .unwrap();
+        let (salt, nonce, ciphertext) = crypto::encrypt_with(&cheap, &plaintext, "pw").unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&VaultFile {
+                version: VAULT_VERSION,
+                kdf: Some(cheap.clone()),
+                salt,
+                nonce,
+                ciphertext,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let v = LocalVault::open_at(&path, "pw").expect("must open with its own params");
+        assert_eq!(
+            v.data().get("prod").map(|e| e.join_tokens.worker.clone()),
+            Some("W-token".to_string()),
+            "the cheaper-parameter vault must decrypt to the same content"
+        );
+        assert_eq!(cheap.memory_kib, 64);
+    }
+
+    /// A vault from a future swarmctl must be refused, not silently
+    /// reinterpreted — the same treatment `Registry::load_from` gives.
+    #[test]
+    fn a_newer_format_version_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = LocalVault::at(tmp.path());
+        vault_at(tmp.path(), "pw");
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: VaultFile = serde_json::from_str(&raw).unwrap();
+        envelope.version = VAULT_VERSION + 1;
+        std::fs::write(&path, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
+
+        let err = LocalVault::open_at(&path, "pw")
+            .expect_err("a newer vault must be refused, not reinterpreted")
+            .to_string();
+        assert!(err.contains("newer swarmctl"), "got: {err}");
+    }
+
+    /// An unknown KDF algorithm must be reported as such rather than surfacing
+    /// as a generic "wrong password".
+    #[test]
+    fn an_unsupported_kdf_algorithm_is_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = LocalVault::at(tmp.path());
+        populated_vault_at(tmp.path(), "pw");
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: VaultFile = serde_json::from_str(&raw).unwrap();
+        envelope.kdf = Some(KdfParams {
+            algorithm: "scrypt".into(),
+            ..KdfParams::current()
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
+
+        let err = LocalVault::open_at(&path, "pw")
+            .expect_err("an unknown algorithm must be refused")
+            .to_string();
+        assert!(
+            err.contains("key-derivation"),
+            "should name the problem: {err}"
+        );
+    }
+
+    /// The decrypted plaintext and the structured secrets must be scrubbed, not
+    /// left in ordinary heap allocations for the process lifetime.
+    #[test]
+    fn decrypted_secrets_are_zeroized() {
+        let mut data = VaultData::default();
+        data.store(
+            "prod",
+            EndpointSecrets {
+                join_tokens: JoinTokens {
+                    worker: "swmtoken-worker-secret".into(),
+                    manager: "swmtoken-manager-secret".into(),
+                },
+                unlock_key: Some("SWMKEY-1-secret".into()),
+                ..Default::default()
+            },
+        );
+
+        data.zeroize();
+
+        assert!(
+            data.endpoints.is_empty(),
+            "entries must be dropped after zeroizing"
+        );
     }
 
     #[test]
@@ -508,6 +732,7 @@ mod tests {
             &path,
             serde_json::to_string(&VaultFile {
                 version: 1,
+                kdf: None,
                 salt,
                 nonce,
                 ciphertext,

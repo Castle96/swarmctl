@@ -213,10 +213,10 @@ pub async fn run_store(
     let tokens = JoinTokens {
         worker: worker_token
             .map(|t| t.to_string())
-            .unwrap_or(existing.join_tokens.worker),
+            .unwrap_or_else(|| existing.join_tokens.worker.clone()),
         manager: manager_token
             .map(|t| t.to_string())
-            .unwrap_or(existing.join_tokens.manager),
+            .unwrap_or_else(|| existing.join_tokens.manager.clone()),
     };
     if tokens.is_empty() {
         anyhow::bail!("Refusing to store an empty token pair for '{}'", endpoint);

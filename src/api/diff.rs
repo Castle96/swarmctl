@@ -51,14 +51,23 @@ stacks.",
         );
     }
 
-    let left_rows = match fetch(left, resource).await {
+    // Both sides in parallel, each bounded. They used to be fetched
+    // sequentially with no timeout at all, so an unresponsive `ssh://` endpoint
+    // hung `diff-clusters` forever while the same endpoint is capped at 30s
+    // under `--endpoints` fan-out.
+    let (left_rows, right_rows) = tokio::join!(
+        with_timeout(fetch(left, resource), FETCH_TIMEOUT),
+        with_timeout(fetch(right, resource), FETCH_TIMEOUT),
+    );
+
+    let left_rows = match left_rows {
         Ok(rows) => rows,
         Err(e) => {
             result.left_unreachable = Some(e.to_string());
             return Ok(result);
         }
     };
-    let right_rows = match fetch(right, resource).await {
+    let right_rows = match right_rows {
         Ok(rows) => rows,
         Err(e) => {
             result.right_unreachable = Some(e.to_string());
@@ -73,6 +82,23 @@ stacks.",
     );
     result.identical = result.diffs.is_empty();
     Ok(result)
+}
+
+/// How long one endpoint gets to answer a diff fetch.
+///
+/// Matches the fan-out endpoint timeout, so the same cluster is given the same
+/// budget whichever multi-cluster command is used.
+pub const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run a future with a deadline, reporting the timeout as an ordinary error.
+async fn with_timeout<F, T>(future: F, limit: std::time::Duration) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    match tokio::time::timeout(limit, future).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("timed out after {}s", limit.as_secs()),
+    }
 }
 
 /// Fetch a resource kind from one endpoint as name -> row JSON.
@@ -276,6 +302,7 @@ pub fn render_diff(diff: &ClusterDiff) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     fn rows(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
         pairs
@@ -430,5 +457,36 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("cannot be compared"), "got: {err}");
+    }
+
+    /// Both endpoints used to be fetched sequentially with no timeout, so an
+    /// unresponsive `ssh://` endpoint hung `diff-clusters` indefinitely — while
+    /// the same endpoint is capped under `--endpoints` fan-out.
+    #[test]
+    fn diff_fetch_is_bounded_and_matches_fan_out() {
+        assert_eq!(
+            FETCH_TIMEOUT,
+            crate::cli::fanout::ENDPOINT_TIMEOUT,
+            "the same endpoint should get the same budget in both commands"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_fetch_reports_a_timeout_rather_than_blocking() {
+        let slow = async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok::<BTreeMap<String, Value>, anyhow::Error>(BTreeMap::new())
+        };
+
+        let err = with_timeout(slow, Duration::from_millis(50))
+            .await
+            .expect_err("a hung fetch must surface as an error");
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_fast_fetch_returns_its_result() {
+        let fast = async { Ok::<BTreeMap<String, Value>, anyhow::Error>(BTreeMap::new()) };
+        assert!(with_timeout(fast, Duration::from_secs(5)).await.is_ok());
     }
 }

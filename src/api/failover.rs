@@ -1,12 +1,18 @@
 use crate::models::failover::{FailoverEvent, FailoverState};
-use bollard::Docker;
 use bollard::models::{Node, NodeState, Task, TaskState};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// Watches for node and task state transitions.
+///
+/// `state` is a plain field, not `Arc<Mutex<_>>`. Every method that touches it
+/// either takes `&mut self` or is `&self` on a monitor that is never shared, so
+/// the interior mutability bought nothing — and the `Arc` was there only because
+/// `set_enabled` and `send_event` took `&self`. In `cli::failover.rs` that same
+/// shape on a second field had already caused a self-deadlock, documented in that
+/// file; removing the lock removes the failure mode.
 pub struct FailoverMonitor {
-    state: Arc<Mutex<FailoverState>>,
+    state: FailoverState,
     event_tx: mpsc::UnboundedSender<FailoverEvent>,
     known_nodes: HashMap<String, NodeState>,
     known_tasks: HashMap<String, TaskState>,
@@ -15,7 +21,7 @@ pub struct FailoverMonitor {
 impl FailoverMonitor {
     pub fn new(event_tx: mpsc::UnboundedSender<FailoverEvent>) -> Self {
         Self {
-            state: Arc::new(Mutex::new(FailoverState::default())),
+            state: FailoverState::default(),
             event_tx,
             known_nodes: HashMap::new(),
             known_tasks: HashMap::new(),
@@ -23,12 +29,11 @@ impl FailoverMonitor {
     }
 
     pub fn get_state(&self) -> FailoverState {
-        self.state.lock().unwrap().clone()
+        self.state.clone()
     }
 
-    pub fn set_enabled(&self, enabled: bool) {
-        let mut state = self.state.lock().unwrap();
-        state.enabled = enabled;
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.state.enabled = enabled;
     }
 
     /// Seed `failed_nodes` from the current node list without emitting events.
@@ -37,7 +42,7 @@ impl FailoverMonitor {
     /// never report a node that is down right now. This reflects the present
     /// state so `status` is accurate without waiting for a change.
     pub fn observe_current(&mut self, nodes: &[Node]) {
-        let mut state = self.state.lock().unwrap();
+        let state = &mut self.state;
         state.failed_nodes.clear();
         for node in nodes {
             let is_down = node
@@ -85,7 +90,7 @@ impl FailoverMonitor {
                         events.push(event.clone());
                         self.send_event(event);
 
-                        let mut state = self.state.lock().unwrap();
+                        let state = &mut self.state;
                         // A flapping node (DOWN -> DISCONNECTED -> DOWN) reached
                         // this twice; pushing unconditionally listed it twice.
                         if !state.failed_nodes.iter().any(|n| n == node_id) {
@@ -93,7 +98,7 @@ impl FailoverMonitor {
                         }
                     }
                     NodeState::READY => {
-                        let mut state = self.state.lock().unwrap();
+                        let state = &mut self.state;
                         state.failed_nodes.retain(|n| n != node_id);
                     }
                     _ => {}
@@ -139,8 +144,7 @@ impl FailoverMonitor {
     }
 
     fn send_event(&self, event: FailoverEvent) {
-        let state = self.state.lock().unwrap();
-        if state.enabled {
+        if self.state.enabled {
             let _ = self.event_tx.send(event);
         }
     }
@@ -148,30 +152,6 @@ impl FailoverMonitor {
 
 fn chrono_now() -> String {
     crate::utils::time::hms(crate::utils::time::epoch_secs())
-}
-
-#[allow(dead_code)]
-pub async fn get_node_tasks(docker: &Docker, node_id: &str) -> anyhow::Result<Vec<Task>> {
-    let mut filters = std::collections::HashMap::new();
-    filters.insert("node".to_string(), vec![node_id.to_string()]);
-
-    let options = bollard::query_parameters::ListTasksOptions {
-        filters: Some(filters),
-    };
-
-    Ok(docker.list_tasks(Some(options)).await?)
-}
-
-#[allow(dead_code)]
-pub async fn get_service_tasks(docker: &Docker, service_id: &str) -> anyhow::Result<Vec<Task>> {
-    let mut filters = std::collections::HashMap::new();
-    filters.insert("service".to_string(), vec![service_id.to_string()]);
-
-    let options = bollard::query_parameters::ListTasksOptions {
-        filters: Some(filters),
-    };
-
-    Ok(docker.list_tasks(Some(options)).await?)
 }
 
 #[cfg(test)]

@@ -10,6 +10,11 @@ use std::path::PathBuf;
 ///
 /// `~/.swarmctl` on Unix; `%USERPROFILE%\.swarmctl` on Windows.
 pub fn swarmctl_dir() -> PathBuf {
+    if let Ok(override_dir) = std::env::var("SWARMCTL_DIR")
+        && !override_dir.is_empty()
+    {
+        return PathBuf::from(override_dir);
+    }
     directories::BaseDirs::new()
         .map(|d| d.home_dir().join(".swarmctl"))
         .unwrap_or_else(|| PathBuf::from(".swarmctl"))
@@ -19,7 +24,6 @@ pub fn swarmctl_dir() -> PathBuf {
 ///
 /// Used by the endpoint registry; kept here so every swarmctl path is defined in
 /// one place.
-#[allow(dead_code)]
 pub fn endpoints_file() -> PathBuf {
     swarmctl_dir().join("endpoints.json")
 }
@@ -56,7 +60,14 @@ fn restrict(_dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Write a file readable and writable only by its owner.
+/// Write a file readable and writable only by its owner, atomically.
+///
+/// The contents go to a temporary file in the same directory, are flushed to
+/// disk, and are then renamed over the target. A rename within a filesystem is
+/// atomic, so a crash or a full disk can no longer leave a half-written vault:
+/// the previous contents survive intact. The old code opened the target with
+/// `truncate(true)` and wrote in place, which could destroy every stored
+/// credential if it died halfway.
 #[cfg(unix)]
 pub fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -66,13 +77,38 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result
         std::fs::create_dir_all(parent)?;
         restrict(parent)?;
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(contents)
+
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.tmp{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
+        std::process::id()
+    ));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(contents)?;
+        // Durable before the rename, so a power loss cannot leave a
+        // correctly-named file with unflushed contents.
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -161,11 +197,75 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn private_write_truncates_existing_content() {
+    fn private_write_replaces_existing_content() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("secret.json");
         write_private(&path, b"a very long previous value").unwrap();
         write_private(&path, b"{}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+    }
+
+    /// The atomic write must not leave its scratch file behind on success, or
+    /// the vault directory accumulates `.<name>.tmp<pid>` files holding
+    /// decrypted-adjacent material.
+    #[cfg(unix)]
+    #[test]
+    fn private_write_leaves_no_temporary_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secret.json");
+        write_private(&path, b"payload").unwrap();
+
+        let leftovers: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "secret.json")
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected files: {leftovers:?}");
+    }
+
+    /// A failed write must leave the previous contents intact. The old
+    /// truncate-then-write could leave a half-written vault, destroying every
+    /// stored credential; the rename is atomic, so the old file survives.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_preserves_the_previous_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secret.json");
+        write_private(&path, b"the good contents").unwrap();
+
+        // Make the directory read-only so the temp file cannot be created.
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = write_private(&path, b"replacement");
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Either the write succeeded (running as root, which ignores the mode)
+        // or it failed cleanly. In both cases the file must parse.
+        if result.is_err() {
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "the good contents",
+                "a failed write must not truncate the existing file"
+            );
+        } else {
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+        }
+    }
+
+    /// The written file must stay owner-only even though it is created as a
+    /// temporary and renamed into place.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secret.json");
+        write_private(&path, b"payload").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "got {:o}", mode & 0o777);
     }
 }

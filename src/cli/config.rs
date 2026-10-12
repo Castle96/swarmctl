@@ -31,6 +31,10 @@ pub async fn run_ls(client: &DockerClient, output: OutputFormat) -> anyhow::Resu
                 println!("config/{}", row.name);
             }
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())
@@ -117,6 +121,10 @@ pub async fn run_inspect(
             let spec = config.spec.clone().unwrap_or_default();
             println!("config/{}", spec.name.as_deref().unwrap_or("unknown"));
         }
+        _ => anyhow::bail!(
+            "-o {} is not supported here; use table, wide, json, yaml or name",
+            output.as_arg()
+        ),
     }
 
     Ok(())

@@ -1,9 +1,26 @@
 use crate::api::client::DockerClient;
+use crate::cli::root::ResourceType;
 use serde_json::Value;
+
+/// Kinds `patch` can apply to.
+///
+/// One predicate, used by both the guard and the error message, so the help
+/// text, the guard, and the dispatch cannot disagree. `patch` previously
+/// documented four kinds and implemented two, so the CLI accepted
+/// `patch secrets foo` and then refused it.
+pub fn is_patchable(resource: ResourceType) -> bool {
+    matches!(
+        resource,
+        ResourceType::Services
+            | ResourceType::Nodes
+            | ResourceType::Secrets
+            | ResourceType::Configs
+    )
+}
 
 pub async fn run(
     client: &DockerClient,
-    resource: &str,
+    resource: ResourceType,
     name: String,
     patch_content: String,
     dry_run: bool,
@@ -20,10 +37,18 @@ pub async fn run(
         }
     }
 
+    if !is_patchable(resource) {
+        anyhow::bail!(
+            "patch is not supported for {}. Patchable kinds: services, nodes, \
+             secrets, configs.",
+            resource
+        );
+    }
+
     let patch: Value = serde_json::from_str(&patch_content)?;
 
     match resource {
-        "service" | "services" => {
+        ResourceType::Services => {
             let service = crate::api::service::find_service(client.inner(), &name).await?;
 
             let version = service.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i32;
@@ -36,7 +61,7 @@ pub async fn run(
             let spec = patched.spec.unwrap_or_default();
 
             if dry_run {
-                print_dry_run("Service", &name, &merged, &serde_json::to_value(&spec)?);
+                print_dry_run("Service", &name, &serde_json::to_value(&spec)?);
                 return Ok(());
             }
 
@@ -49,7 +74,7 @@ pub async fn run(
                 .await?;
             println!("Service '{}' patched", name);
         }
-        "node" | "nodes" => {
+        ResourceType::Nodes => {
             let node = crate::api::node::find_node(client.inner(), &name).await?;
             let version = node.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
             let current = serde_json::to_value(&node)?;
@@ -61,7 +86,7 @@ pub async fn run(
             let spec = patched.spec.unwrap_or_default();
 
             if dry_run {
-                print_dry_run("Node", &name, &merged, &serde_json::to_value(&spec)?);
+                print_dry_run("Node", &name, &serde_json::to_value(&spec)?);
                 return Ok(());
             }
 
@@ -71,17 +96,77 @@ pub async fn run(
             client.inner().update_node(&name, spec, opts).await?;
             println!("Node '{}' patched", name);
         }
-        _ => anyhow::bail!("Unsupported resource type for patch: {}", resource),
+        // The Engine API addresses secrets and configs by ID, not by name.
+        ResourceType::Secrets => {
+            let secret = crate::api::secret::find_secret(client.inner(), &name).await?;
+            let id = require_id(&secret.id, "Secret", &name)?;
+            let version = secret.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
+            let current = serde_json::to_value(&secret)?;
+            let merged = json_merge(
+                json_merge(Value::Object(Default::default()), current),
+                patch,
+            );
+            let patched: bollard::models::Secret = serde_json::from_value(merged.clone())?;
+            let spec = patched.spec.unwrap_or_default();
+
+            if dry_run {
+                print_dry_run("Secret", &name, &serde_json::to_value(&spec)?);
+                return Ok(());
+            }
+
+            let opts = bollard::query_parameters::UpdateSecretOptionsBuilder::default()
+                .version(version)
+                .build();
+            client.inner().update_secret(&id, spec, opts).await?;
+            println!("Secret '{}' patched", name);
+        }
+        ResourceType::Configs => {
+            let config = crate::api::config::find_config(client.inner(), &name).await?;
+            let id = require_id(&config.id, "Config", &name)?;
+            let version = config.version.as_ref().and_then(|v| v.index).unwrap_or(0) as i64;
+            let current = serde_json::to_value(&config)?;
+            let merged = json_merge(
+                json_merge(Value::Object(Default::default()), current),
+                patch,
+            );
+            let patched: bollard::models::Config = serde_json::from_value(merged.clone())?;
+            let spec = patched.spec.unwrap_or_default();
+
+            if dry_run {
+                print_dry_run("Config", &name, &serde_json::to_value(&spec)?);
+                return Ok(());
+            }
+
+            let opts = bollard::query_parameters::UpdateConfigOptionsBuilder::default()
+                .version(version)
+                .build();
+            client.inner().update_config(&id, spec, opts).await?;
+            println!("Config '{}' patched", name);
+        }
+        // `is_patchable` above already rejected everything else.
+        other => unreachable!("patch dispatch reached for {other:?}"),
     }
 
     Ok(())
+}
+
+/// Require the API id of an object looked up by name.
+fn require_id(id: &Option<String>, kind: &str, name: &str) -> anyhow::Result<String> {
+    id.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} '{}' has no id, so it cannot be patched. The daemon returned a \
+             response without one.",
+            kind,
+            name
+        )
+    })
 }
 
 /// Show what a patch would change without applying it.
 ///
 /// `--dry-run` used to be parsed and discarded, so the patch was applied to the
 /// cluster anyway.
-fn print_dry_run(kind: &str, name: &str, merged: &Value, spec: &Value) {
+fn print_dry_run(kind: &str, name: &str, spec: &Value) {
     println!("[dry run] Would patch {} '{}'", kind, name);
     println!("  Resulting spec:");
     let rendered =
@@ -89,7 +174,6 @@ fn print_dry_run(kind: &str, name: &str, merged: &Value, spec: &Value) {
     for line in rendered.lines() {
         println!("    {}", line);
     }
-    let _ = merged;
 }
 
 /// RFC 7386 JSON merge patch: objects merge recursively, a `null` value deletes
@@ -152,5 +236,41 @@ mod tests {
     fn arrays_are_replaced_not_merged() {
         let got = json_merge(json!({"a": [1, 2, 3]}), json!({"a": [9]}));
         assert_eq!(got, json!({"a": [9]}));
+    }
+
+    /// `patch` documented four kinds and implemented two, so the CLI accepted
+    /// `patch secrets foo` and then refused it. The help text and the dispatch
+    /// must agree, and the kinds with no update endpoint must not be listed.
+    #[test]
+    fn patchable_kinds_match_what_is_documented() {
+        for kind in [
+            ResourceType::Services,
+            ResourceType::Nodes,
+            ResourceType::Secrets,
+            ResourceType::Configs,
+        ] {
+            assert!(is_patchable(kind), "{kind} should be patchable");
+        }
+        for kind in [
+            ResourceType::Tasks,
+            ResourceType::Networks,
+            ResourceType::Stacks,
+        ] {
+            assert!(
+                !is_patchable(kind),
+                "{kind} has no update endpoint and must not be advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn require_id_rejects_a_response_without_one() {
+        assert_eq!(
+            require_id(&Some("abc".into()), "Secret", "web").unwrap(),
+            "abc"
+        );
+        let err = require_id(&None, "Secret", "web")
+            .expect_err("a missing id should be reported, not sent as a name");
+        assert!(err.to_string().contains("has no id"));
     }
 }

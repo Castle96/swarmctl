@@ -1,13 +1,13 @@
 use crate::api::client::DockerClient;
 use crate::cli::{
     api_resources, apply, attach, cluster, completion, config, context, cordon, cp, create, delete,
-    describe, diff, discover, edit, endpoint, events, exec, explain, failover, fanout, get, label,
-    logs, patch, port_forward, ports, replace, rollout, run, scale, set, stack, swarm, system,
-    taint, top, vault, volume, wait,
+    describe, diff, discover, drift, edit, endpoint, events, exec, explain, failover, fanout, get,
+    label, logs, patch, port_forward, ports, replace, rollout, run, scale, set, stack, swarm,
+    system, taint, top, vault, volume, wait,
 };
 #[cfg(feature = "tui")]
 use crate::tui;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
 #[derive(Parser, Clone)]
@@ -16,7 +16,7 @@ use clap_complete::Shell;
 #[command(long_about = "A kubectl-inspired CLI for managing Docker Swarm clusters")]
 pub struct Cli {
     /// Output format
-    #[arg(short, long, value_enum, default_value = "table")]
+    #[arg(short, long, value_parser = parse_output_format, default_value = "table")]
     pub(crate) output: OutputFormat,
 
     /// Watch for changes
@@ -26,23 +26,37 @@ pub struct Cli {
     watch: bool,
 
     /// Docker daemon host (e.g. tcp://192.168.1.100:2376, ssh://user@host, unix:///var/run/docker.sock)
-    #[arg(long, env = "DOCKER_HOST")]
+    ///
+    /// Global so it parses in either position, like `--watch`. Without
+    /// `global = true` clap rejects `--host` after a subcommand outright, and
+    /// before a subcommand with a positional NAME it binds the host value to
+    /// that positional instead — so `swarmctl --host ssh://x delete services
+    /// web` tried to delete a service literally named `ssh://x`.
+    #[arg(long, global = true, env = "DOCKER_HOST")]
     host: Option<String>,
 
     /// Docker context to use (overrides DOCKER_HOST and current context)
-    #[arg(long, short = 'c', env = "DOCKER_CONTEXT")]
+    ///
+    /// Global, but only under its long name: `-c` is already taken by
+    /// `stack deploy -c/--compose-file`, and a global short must be unique
+    /// across every subcommand. `--context` still parses in either position;
+    /// `-c` only works before the subcommand.
+    #[arg(long, global = true, env = "DOCKER_CONTEXT")]
     context: Option<String>,
 
     /// Path to TLS CA certificate
-    #[arg(long)]
+    ///
+    /// Global for the same reason as `--host`: these must survive being
+    /// written either side of the subcommand.
+    #[arg(long, global = true)]
     tlscacert: Option<String>,
 
     /// Path to TLS client certificate
-    #[arg(long)]
+    #[arg(long, global = true)]
     tlscert: Option<String>,
 
     /// Path to TLS client key
-    #[arg(long)]
+    #[arg(long, global = true)]
     tlskey: Option<String>,
 
     /// Comma-separated endpoint names to run this command against
@@ -56,58 +70,182 @@ pub struct Cli {
     #[arg(short = 'y', long, global = true)]
     pub(crate) yes: bool,
 
-    /// Verbose output level
-    #[arg(short = 'v', global = true, action = clap::ArgAction::Count)]
+    /// Verbose output level (repeatable: -v info, -vv debug, -vvv trace)
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
 
     #[command(subcommand)]
     pub(crate) command: Commands,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+/// Reject flag combinations that used to be silently resolved in one direction.
+///
+/// `--context` previously won outright and every `--host`/`--tls*` flag was
+/// discarded, so `swarmctl --host tcp://x --context prod get nodes` quietly
+/// connected somewhere other than where the command line said. Docker treats
+/// this as a conflict; so does swarmctl now.
+pub fn connection_conflict(
+    context: Option<&str>,
+    host: Option<&str>,
+    // TLS flags alongside --context are a warning rather than an error (the
+    // context carries its own), so this is part of the signature for symmetry
+    // and for callers that want to know, not for the conflict rule itself.
+    _tls_requested: bool,
+) -> anyhow::Result<()> {
+    if let (Some(ctx), Some(_)) = (context, host) {
+        anyhow::bail!(
+            "cannot combine --context {ctx} with --host: a context already \
+             names a daemon. Drop one, or use --host alone."
+        );
+    }
+    Ok(())
+}
+
+/// Clap entry point for `-o`. Surfaces [`OutputFormat::parse`]'s message so a
+/// bad `-o` value explains itself instead of printing clap's enum list.
+fn parse_output_format(value: &str) -> Result<OutputFormat, String> {
+    OutputFormat::parse(value).map_err(|e| e.to_string())
+}
+
+/// `-o` output format.
+///
+/// Unlike the previous fixed `ValueEnum`, this carries a payload so kubectl's
+/// compound forms work: `-o jsonpath={.metadata.name}`, `-o custom-columns=A:.x`,
+/// `-o go-template={{...}}`. Parsed with [`OutputFormat::parse`], which is wired
+/// into clap via `value_parser`.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OutputFormat {
     Table,
+    Wide,
     Json,
     Yaml,
-    Wide,
     Name,
+    /// `-o jsonpath=<template>`
+    JsonPath(String),
+    /// `-o jsonpath-as-json=<template>`
+    JsonPathAsJson(String),
+    /// `-o go-template=<template>`
+    GoTemplate(String),
+    /// `-o custom-columns=<NAME>:<path>,...`
+    CustomColumns(String),
+}
+
+impl OutputFormat {
+    /// Parse the `-o` value, kubectl-style.
+    ///
+    /// Accepts a bare format name or `name=payload`. Splitting happens at the
+    /// *first* `=` so a jsonpath template containing `==` survives intact.
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        let v = value.trim();
+        let (name, payload) = match v.split_once('=') {
+            Some((n, p)) => (n.trim(), Some(p)),
+            None => (v, None),
+        };
+        let needs_payload = |p: Option<&str>| -> anyhow::Result<String> {
+            p.filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("-o {name} requires an argument, e.g. -o {name}=<expression>")
+                })
+        };
+        Ok(match name {
+            "table" => OutputFormat::Table,
+            "wide" => OutputFormat::Wide,
+            "json" => OutputFormat::Json,
+            "yaml" => OutputFormat::Yaml,
+            "name" => OutputFormat::Name,
+            "jsonpath" => OutputFormat::JsonPath(needs_payload(payload)?),
+            "jsonpath-as-json" => OutputFormat::JsonPathAsJson(needs_payload(payload)?),
+            "go-template" => OutputFormat::GoTemplate(needs_payload(payload)?),
+            "custom-columns" => OutputFormat::CustomColumns(needs_payload(payload)?),
+            other => anyhow::bail!(
+                "unable to match a printer suitable for the output format \"{other}\"; \
+                 supported: table, wide, json, yaml, name, \
+                 jsonpath=EXPR, jsonpath-as-json=EXPR, go-template=EXPR, custom-columns=SPEC"
+            ),
+        })
+    }
+
+    /// True for formats that are meant to be piped, not read.
+    ///
+    /// The connection banner is suppressed for these so `-o json | jq` is clean.
+    pub fn is_machine(&self) -> bool {
+        !matches!(
+            self,
+            OutputFormat::Table | OutputFormat::Wide | OutputFormat::Name
+        )
+    }
+
+    /// The `-o` spelling, for round-tripping in error messages.
+    pub fn as_arg(&self) -> String {
+        match self {
+            OutputFormat::Table => "table".into(),
+            OutputFormat::Wide => "wide".into(),
+            OutputFormat::Json => "json".into(),
+            OutputFormat::Yaml => "yaml".into(),
+            OutputFormat::Name => "name".into(),
+            OutputFormat::JsonPath(t) => format!("jsonpath={t}"),
+            OutputFormat::JsonPathAsJson(t) => format!("jsonpath-as-json={t}"),
+            OutputFormat::GoTemplate(t) => format!("go-template={t}"),
+            OutputFormat::CustomColumns(t) => format!("custom-columns={t}"),
+        }
+    }
 }
 
 #[derive(Clone, Subcommand)]
 pub(crate) enum Commands {
     /// Display one or many resources
     Get {
-        /// Resource type (can be comma-separated: svc,po)
-        resource: ResourceType,
+        /// Resource type. Accepts plural, singular and short names, may be
+        /// comma-separated, may carry a `.VERSION.GROUP` qualifier, and may name
+        /// objects inline with `TYPE/NAME`.
+        ///
+        /// Examples: `svc`, `po,svc`, `po/web`, `services.v1.`
+        resource: String,
 
-        /// Resource name
-        name: Option<String>,
+        /// Resource name(s). May be repeated.
+        #[arg(num_args = 0..)]
+        name: Vec<String>,
 
         /// Show labels
         #[arg(long)]
         show_labels: bool,
 
-        /// Filter by label selector
+        /// Include the resource type when printing names
         #[arg(long)]
+        show_kind: bool,
+
+        /// Do not print the table header
+        #[arg(long)]
+        no_headers: bool,
+
+        /// Extra label column(s) to display; repeatable or comma-separated
+        #[arg(short = 'L', long, value_name = "LABEL", value_delimiter = ',')]
+        label_columns: Vec<String>,
+
+        /// Filter by label selector: key=value, key==v, key!=v, key, !key,
+        /// key in (a,b), key notin (a,b). Comma-separated terms are ANDed.
+        #[arg(short = 'l', long)]
         selector: Option<String>,
 
-        /// Filter by field selector (key=value)
+        /// Filter by field selector against the Kubernetes envelope
+        /// (e.g. metadata.name=web, status.state=ready)
         #[arg(long)]
         field_selector: Option<String>,
 
-        /// Sort by a JSON field path (e.g. .metadata.name)
+        /// Sort by a jsonpath expression (e.g. '{.metadata.name}')
         #[arg(long)]
         sort_by: Option<String>,
 
         /// Output format (table, json, yaml, wide, name)
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
 
     /// Show detailed information about a resource
     Describe {
-        /// Resource type
-        resource: ResourceType,
+        /// Resource type (plural, singular or short name)
+        resource: String,
 
         /// Resource name (optional if using --selector)
         name: Option<String>,
@@ -119,8 +257,8 @@ pub(crate) enum Commands {
 
     /// Create a resource from a file or stdin
     Create {
-        /// Resource type
-        resource: ResourceType,
+        /// Resource type (plural, singular or short name)
+        resource: String,
 
         /// Resource name
         name: Option<String>,
@@ -138,14 +276,14 @@ pub(crate) enum Commands {
         dry_run: bool,
 
         /// Output format for the resulting object
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
 
     /// Delete resources
     Delete {
-        /// Resource type
-        resource: ResourceType,
+        /// Resource type (plural, singular or short name)
+        resource: String,
 
         /// Resource name
         name: Option<String>,
@@ -187,7 +325,7 @@ pub(crate) enum Commands {
     /// Fetch the logs of a resource
     Logs {
         /// Resource type (service or task)
-        resource: LogResourceType,
+        resource: String,
 
         /// Resource name
         name: String,
@@ -266,8 +404,8 @@ pub(crate) enum Commands {
 
     /// Create or update a resource from a file or stdin
     Apply {
-        /// Resource type
-        resource: ResourceType,
+        /// Resource type (plural, singular or short name)
+        resource: String,
 
         /// Resource name
         name: Option<String>,
@@ -285,7 +423,7 @@ pub(crate) enum Commands {
         dry_run: bool,
 
         /// Output format for the resulting object
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
 
@@ -319,7 +457,7 @@ pub(crate) enum Commands {
         publish: Vec<String>,
 
         /// Output format for the created service object
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
 
@@ -393,7 +531,7 @@ pub(crate) enum Commands {
     /// Update labels on a resource
     Label {
         /// Resource type (node, service, secret, config)
-        resource: ResourceType,
+        resource: String,
 
         /// Resource name
         name: Option<String>,
@@ -423,7 +561,7 @@ pub(crate) enum Commands {
     /// Show documentation for a resource type
     Explain {
         /// Resource type (omit to list them all)
-        resource: Option<ResourceType>,
+        resource: Option<String>,
     },
 
     /// Drain a node (set to drain availability)
@@ -435,7 +573,7 @@ pub(crate) enum Commands {
     /// Edit a resource
     Edit {
         /// Resource type (service, node, secret, config)
-        resource: ResourceType,
+        resource: String,
 
         /// Resource name
         name: String,
@@ -444,7 +582,7 @@ pub(crate) enum Commands {
     /// Diff a resource against a file
     Diff {
         /// Resource type (service, node, secret, config)
-        resource: ResourceType,
+        resource: String,
 
         /// Resource name
         name: String,
@@ -454,10 +592,30 @@ pub(crate) enum Commands {
         filename: String,
     },
 
+    /// Report services whose live state no longer matches the last apply
+    Drift {
+        /// Output format (table, json, yaml)
+        #[arg(short, long, value_parser = parse_output_format)]
+        output: Option<OutputFormat>,
+    },
+
+    /// Forget recorded manifests so `drift` stops tracking them
+    ///
+    /// With no arguments, clears every recorded manifest for the current
+    /// endpoint. Pass an endpoint name to clear a retired cluster's records.
+    DriftForget {
+        /// Endpoint whose recorded manifests should be discarded
+        endpoint: Option<String>,
+
+        /// Discard the manifests of every endpoint with recorded state
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Apply a JSON merge patch to a resource
     Patch {
-        /// Resource type (service, node, secret, config)
-        resource: ResourceType,
+        /// Resource type (services, nodes, secrets, configs)
+        resource: String,
 
         /// Resource name
         name: String,
@@ -489,8 +647,8 @@ pub(crate) enum Commands {
 
     /// Wait for a resource to reach a condition
     Wait {
-        /// Resource type
-        resource: WaitResourceType,
+        /// Resource type (service, task or node)
+        resource: String,
 
         /// Resource name
         name: String,
@@ -537,8 +695,8 @@ pub(crate) enum Commands {
 
     /// Replace a resource from a file or stdin
     Replace {
-        /// Resource type
-        resource: ResourceType,
+        /// Resource type (plural, singular or short name)
+        resource: String,
 
         /// Filename to read from
         #[arg(short, long)]
@@ -557,7 +715,7 @@ pub(crate) enum Commands {
         force: bool,
 
         /// Output format for the resulting object
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
 
@@ -576,11 +734,11 @@ pub(crate) enum Commands {
         right: String,
 
         /// Resource kind to compare (tasks are excluded: their ids are per-run)
-        #[arg(long, value_enum, default_value = "services")]
-        resource: DiffResourceType,
+        #[arg(long, default_value = "services")]
+        resource: String,
 
         /// Output format
-        #[arg(short, long, value_enum, default_value = "table")]
+        #[arg(short, long, value_parser = parse_output_format, default_value = "table")]
         output: OutputFormat,
     },
 
@@ -677,7 +835,7 @@ pub enum ContextCommand {
         name: String,
 
         /// Output format
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
     /// Create a new Docker context for a remote host
@@ -774,7 +932,7 @@ pub enum VaultCommand {
     /// List stored credentials per endpoint
     Ls {
         /// Output format
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
     /// Store join tokens for an endpoint
@@ -800,7 +958,7 @@ pub enum VolumeCommand {
     /// List volumes
     Ls {
         /// Output format
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
     /// Inspect a volume
@@ -808,7 +966,7 @@ pub enum VolumeCommand {
         /// Volume name
         name: String,
         /// Output format
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
     /// Create a volume
@@ -851,7 +1009,7 @@ pub enum EndpointCommand {
     /// List registered endpoints
     Ls {
         /// Output format
-        #[arg(short, long, value_enum, default_value = "table")]
+        #[arg(short, long, value_parser = parse_output_format, default_value = "table")]
         output: OutputFormat,
 
         /// Emit JSON regardless of --output
@@ -921,7 +1079,7 @@ pub enum EndpointCommand {
         name: String,
 
         /// Output format
-        #[arg(short, long, value_enum, default_value = "table")]
+        #[arg(short, long, value_parser = parse_output_format, default_value = "table")]
         output: OutputFormat,
     },
 
@@ -932,7 +1090,7 @@ pub enum EndpointCommand {
         endpoint: Option<String>,
 
         /// Output format
-        #[arg(short, long, value_enum, default_value = "table")]
+        #[arg(short, long, value_parser = parse_output_format, default_value = "table")]
         output: OutputFormat,
 
         /// Re-probe every 5 seconds
@@ -962,7 +1120,7 @@ pub enum FailoverCommand {
     /// Show failover status and events
     Status {
         /// Output format
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
     /// Enable automatic failover
@@ -980,7 +1138,7 @@ pub enum FailoverCommand {
         #[arg(long)]
         to: String,
         /// Output format
-        #[arg(short, long, value_enum)]
+        #[arg(short, long, value_parser = parse_output_format)]
         output: Option<OutputFormat>,
     },
 }
@@ -1053,33 +1211,34 @@ pub enum RolloutCommand {
 
 /// Resource kinds that can be compared across clusters.
 ///
-/// A separate enum from [`ResourceType`] so `--help` lists only valid choices
-/// and clap rejects `tasks` up front, rather than the handler explaining why
-/// afterwards.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Debug)]
-pub enum DiffResourceType {
-    Nodes,
-    Services,
-    Networks,
-    Secrets,
-    Configs,
-    Stacks,
-}
-
-impl From<DiffResourceType> for ResourceType {
-    fn from(value: DiffResourceType) -> Self {
-        match value {
-            DiffResourceType::Nodes => ResourceType::Nodes,
-            DiffResourceType::Services => ResourceType::Services,
-            DiffResourceType::Networks => ResourceType::Networks,
-            DiffResourceType::Secrets => ResourceType::Secrets,
-            DiffResourceType::Configs => ResourceType::Configs,
-            DiffResourceType::Stacks => ResourceType::Stacks,
+/// Tasks are excluded on purpose: their ids are per-run, so comparing them
+/// across clusters produces spurious diffs.
+pub fn resolve_diff_resource(token: &str) -> anyhow::Result<ResourceType> {
+    let r = crate::cli::registry::resolve(token)?;
+    match r {
+        ResourceType::Tasks => {
+            anyhow::bail!("tasks cannot be diffed across clusters: their ids are per-run")
         }
+        _ => Ok(r),
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Debug)]
+/// The resource kinds `get`, `describe`, `apply` and friends accept.
+///
+/// The `no`/`svc`/`po`/`net`/`sec`/`cm`/`st` short forms are declared as clap
+/// aliases so they actually parse. They were previously documented in BUILD.md
+/// but only listed in a hand-written `FromStr` impl that clap never called —
+/// clap's `ValueEnum` derive supplies its own parser, so `swarmctl get po`
+/// failed with "invalid value" despite the docs.
+/// Every resource swarmctl can address.
+///
+/// This is a *dispatch* enum: the `match` arms in `get.rs`, `delete.rs` and the
+/// rest stay exhaustive because of it. How a user's string becomes one of these
+/// — plural, singular, short name, `TYPE/NAME`, `.VERSION.GROUP`, comma lists —
+/// is entirely [`crate::cli::registry`]'s job. Nothing here is a clap
+/// `ValueEnum` any more: that used to duplicate every short name as an `alias`
+/// attribute, and clap's "invalid value" error was not kubectl's shape.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ResourceType {
     Nodes,
     Services,
@@ -1088,22 +1247,6 @@ pub enum ResourceType {
     Secrets,
     Configs,
     Stacks,
-}
-
-impl std::str::FromStr for ResourceType {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "no" | "node" | "nodes" => Ok(ResourceType::Nodes),
-            "svc" | "service" | "services" => Ok(ResourceType::Services),
-            "po" | "task" | "tasks" => Ok(ResourceType::Tasks),
-            "net" | "network" | "networks" => Ok(ResourceType::Networks),
-            "sec" | "secret" | "secrets" => Ok(ResourceType::Secrets),
-            "cm" | "config" | "configs" => Ok(ResourceType::Configs),
-            "st" | "stack" | "stacks" => Ok(ResourceType::Stacks),
-            _ => Err(format!("Unknown resource type: {}", s)),
-        }
-    }
 }
 
 impl std::fmt::Display for ResourceType {
@@ -1169,52 +1312,117 @@ pub enum SetCommand {
     },
 }
 
-#[derive(Clone, ValueEnum)]
-pub enum LogResourceType {
-    Service,
-    Task,
+/// Resource kinds `logs` accepts.
+///
+/// Parsed through [`crate::cli::registry`] like every other resource, then
+/// narrowed: logs only make sense for a workload, not a network or a secret.
+pub fn resolve_log_resource(token: &str) -> anyhow::Result<ResourceType> {
+    let r = crate::cli::registry::resolve(token)?;
+    match r {
+        ResourceType::Services | ResourceType::Tasks => Ok(r),
+        _ => anyhow::bail!(
+            "logs supports services and tasks, not {}",
+            crate::cli::registry::info(r).plural
+        ),
+    }
 }
 
-#[derive(Clone, ValueEnum)]
-pub enum WaitResourceType {
-    Service,
-    Task,
-    Node,
-}
-
-impl std::fmt::Display for WaitResourceType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WaitResourceType::Service => write!(f, "service"),
-            WaitResourceType::Task => write!(f, "task"),
-            WaitResourceType::Node => write!(f, "node"),
-        }
+/// Resource kinds `wait` accepts.
+pub fn resolve_wait_resource(token: &str) -> anyhow::Result<ResourceType> {
+    let r = crate::cli::registry::resolve(token)?;
+    match r {
+        ResourceType::Services | ResourceType::Tasks | ResourceType::Nodes => Ok(r),
+        _ => anyhow::bail!(
+            "wait supports services, tasks and nodes, not {}",
+            crate::cli::registry::info(r).plural
+        ),
     }
 }
 
 impl Cli {
+    /// Count verbosity flags in a single argv token.
+    ///
+    /// Accepts `-v`, `-vv`, `-vvv`, `--verbose`, and `--verbose=vv`. Returns 0 for
+    /// anything else, including clusters that mix in other flags (`-vy`), which
+    /// clap would reject anyway.
+    fn count_verbosity_in_arg(arg: &str) -> u8 {
+        let Some(body) = arg.strip_prefix('-') else {
+            return 0;
+        };
+        let body = body.strip_prefix('-').unwrap_or(body);
+        let body = body.strip_prefix("verbose").unwrap_or(body);
+        // Empty here means a bare `-v` or `--verbose`; a bare `-` counts as nothing.
+        if body.is_empty() {
+            return if arg.ends_with("verbose") || arg == "-v" {
+                1
+            } else {
+                0
+            };
+        }
+        if body.bytes().all(|b| b == b'v') {
+            body.len() as u8
+        } else {
+            0
+        }
+    }
+
+    /// Count `-v` flags in the raw argv, before clap parsing.
+    ///
+    /// Logging has to be configured before any work happens, but `-v` lives on
+    /// the parsed `Cli`. Scanning argv directly avoids parsing the whole command
+    /// twice and keeps `-v` working even for paths that never build a `Cli`.
+    pub fn verbose_count(args: impl IntoIterator<Item = String>) -> u8 {
+        args.into_iter()
+            .map(|a| Self::count_verbosity_in_arg(&a))
+            .sum()
+    }
+
     pub async fn run() -> anyhow::Result<()> {
         let cli = Cli::parse();
 
+        // clap folds `env =` into the flag, so by the time we get here a value
+        // may have come from the command line or from DOCKER_HOST. Both are
+        // handled identically, which is what makes `--host` override
+        // DOCKER_HOST rather than the other way round.
+        let explicit_host = cli.host.clone();
+        let explicit_context = cli.context.clone().filter(|c| !c.trim().is_empty());
+
+        // `--context` used to win silently: the explicit `--host` and every
+        // `--tls*` flag were assembled into a ConnectionConfig and then thrown
+        // away by the context branch, so `swarmctl --host tcp://x --context prod`
+        // connected to prod with no warning at all. Docker treats this as a
+        // conflict, and so do we — a silently ignored flag is worse than an error.
+        let tls_requested =
+            cli.tlscacert.is_some() || cli.tlscert.is_some() || cli.tlskey.is_some();
+        connection_conflict(
+            explicit_context.as_deref(),
+            explicit_host.as_deref(),
+            tls_requested,
+        )?;
+
+        if explicit_context.is_some() && tls_requested {
+            eprintln!(
+                "Warning: --tls* flags are ignored when --context is set; \
+                 the context carries its own TLS settings."
+            );
+        }
+
         let try_client = || -> anyhow::Result<DockerClient> {
-            if cli.context.is_some()
-                || cli.host.is_some()
+            if let Some(ref ctx_name) = explicit_context {
+                DockerClient::with_context(Some(ctx_name))
+            } else if explicit_host.is_some()
                 || cli.tlscacert.is_some()
                 || cli.tlscert.is_some()
                 || cli.tlskey.is_some()
             {
                 let conn_config = crate::api::client::ConnectionConfig {
-                    host: cli.host.clone(),
+                    host: explicit_host.clone(),
                     tlscacert: cli.tlscacert.clone(),
                     tlscert: cli.tlscert.clone(),
                     tlskey: cli.tlskey.clone(),
                     ..Default::default()
                 };
-                if let Some(ref ctx_name) = cli.context {
-                    DockerClient::with_context(Some(ctx_name))
-                } else {
-                    DockerClient::with_config(&conn_config)
-                }
+                DockerClient::with_config(&conn_config)
             } else {
                 DockerClient::with_context(None)
             }
@@ -1283,10 +1491,7 @@ impl Cli {
         // precede the payload and make `swarmctl get services -o json | jq` fail.
         // It is also skipped entirely for machine-readable output, which avoids
         // a pointless `inspect_swarm` round trip.
-        let human_output = matches!(
-            cli.output,
-            OutputFormat::Table | OutputFormat::Wide | OutputFormat::Name
-        );
+        let human_output = !cli.output.is_machine();
         if Self::needs_swarm(&cli.command)
             && human_output
             && let Some(ref client) = client
@@ -1321,11 +1526,11 @@ impl Cli {
                 return Ok(());
             }
             Commands::Context { command } => {
-                Self::dispatch_context(command, cli.output).await?;
+                Self::dispatch_context(command, cli.output.clone()).await?;
                 return Ok(());
             }
             Commands::Vault { command } => {
-                Self::dispatch_vault(command, cli.output).await?;
+                Self::dispatch_vault(command, cli.output.clone()).await?;
                 return Ok(());
             }
             Commands::Completion { shell } => {
@@ -1337,12 +1542,24 @@ impl Cli {
                 println!("Docker API version: {}", bollard::API_DEFAULT_VERSION);
                 return Ok(());
             }
-            Commands::ApiResources => {
-                api_resources::run().await?;
+            Commands::Explain { resource } => {
+                explain::run(resource).await?;
                 return Ok(());
             }
-            Commands::Explain { resource } => {
-                explain::run(resource.map(|r| r.to_string())).await?;
+            // Builds its own client: the whole point of `api-resources` is to
+            // report what a daemon actually says, and it must degrade to the
+            // compiled-in table when none is reachable.
+            Commands::ApiResources => {
+                match client.as_ref() {
+                    Some(c) => api_resources::run(c).await?,
+                    None => api_resources::run_offline().await?,
+                }
+                return Ok(());
+            }
+            // Only touches the local manifest store, so it must work with no
+            // daemon reachable — the same reason the endpoint registry is here.
+            Commands::DriftForget { endpoint, all } => {
+                drift::forget(endpoint.as_deref(), all, cli.host.as_deref())?;
                 return Ok(());
             }
             _ => {}
@@ -1382,26 +1599,37 @@ impl Cli {
             | Commands::Completion { .. }
             | Commands::Version
             | Commands::ApiResources
-            | Commands::Explain { .. } => {
+            | Commands::Explain { .. }
+            | Commands::DriftForget { .. } => {
                 unreachable!("local-only command groups are handled before the client is built")
             }
             Commands::Get {
                 resource,
                 name,
                 show_labels,
+                show_kind,
+                no_headers,
+                label_columns,
                 selector,
                 field_selector,
                 sort_by,
                 output: get_output,
             } => {
-                let output = get_output.unwrap_or(cli.output);
+                let output = get_output.unwrap_or_else(|| cli.output.clone());
+                let requests = crate::cli::registry::parse_request(
+                    &resource,
+                    &name,
+                    &crate::cli::kobject::api_version(),
+                )?;
                 get::run(
                     client,
-                    resource,
-                    name,
+                    &requests,
                     output,
                     get::ListOptions {
                         show_labels,
+                        show_kind,
+                        no_headers,
+                        label_columns,
                         selector,
                         field_selector,
                         sort_by,
@@ -1415,7 +1643,8 @@ impl Cli {
                 name,
                 selector,
             } => {
-                describe::run(client, resource, name, selector, cli.output).await?;
+                let resource = crate::cli::registry::resolve(&resource)?;
+                describe::run(client, resource, name, selector, &cli.output).await?;
             }
             Commands::Create {
                 resource,
@@ -1425,7 +1654,8 @@ impl Cli {
                 dry_run,
                 output: create_output,
             } => {
-                let output = create_output.unwrap_or(cli.output);
+                let resource = crate::cli::registry::resolve(&resource)?;
+                let output = create_output.unwrap_or_else(|| cli.output.clone());
                 create::run(client, resource, name, filename, stdin, dry_run, output).await?;
             }
             Commands::Delete {
@@ -1438,6 +1668,7 @@ impl Cli {
                 timeout,
                 wait,
             } => {
+                let resource = crate::cli::registry::resolve(&resource)?;
                 delete::run(
                     client,
                     resource,
@@ -1449,6 +1680,7 @@ impl Cli {
                         grace_period,
                         timeout,
                         wait_for_delete: wait,
+                        host: cli.host.clone(),
                     },
                 )
                 .await?;
@@ -1467,6 +1699,7 @@ impl Cli {
                 prefix,
                 ignore_errors,
             } => {
+                let resource = crate::cli::root::resolve_log_resource(&resource)?;
                 logs::run(
                     client,
                     resource,
@@ -1497,7 +1730,7 @@ impl Cli {
                 } else {
                     ports::run(
                         client,
-                        cli.output,
+                        cli.output.clone(),
                         available,
                         range_start,
                         range_end,
@@ -1508,7 +1741,7 @@ impl Cli {
                 #[cfg(not(feature = "tui"))]
                 ports::run(
                     client,
-                    cli.output,
+                    cli.output.clone(),
                     available,
                     range_start,
                     range_end,
@@ -1531,8 +1764,21 @@ impl Cli {
                 dry_run,
                 output: apply_output,
             } => {
-                let output = apply_output.unwrap_or(cli.output);
-                apply::run(client, resource, name, filename, stdin, dry_run, output).await?;
+                let resource = crate::cli::registry::resolve(&resource)?;
+                let output = apply_output.unwrap_or_else(|| cli.output.clone());
+                apply::run(
+                    client,
+                    resource,
+                    apply::ApplyOptions {
+                        name,
+                        filename,
+                        stdin,
+                        dry_run,
+                        output,
+                        host: cli.host.as_deref(),
+                    },
+                )
+                .await?;
             }
             Commands::Run {
                 name,
@@ -1554,7 +1800,7 @@ impl Cli {
                         labels,
                         network,
                         publish,
-                        output: output.unwrap_or(cli.output),
+                        output: output.unwrap_or_else(|| cli.output.clone()),
                     },
                 )
                 .await?;
@@ -1623,9 +1869,9 @@ impl Cli {
                 all,
                 ..
             } => {
-                let resource_str = resource.to_string();
+                let resource = crate::cli::registry::resolve(&resource)?;
                 let name = name.ok_or_else(|| anyhow::anyhow!("name is required for label"))?;
-                label::run(client, &resource_str, name, labels, overwrite, all).await?;
+                label::run(client, resource, name, labels, overwrite, all).await?;
             }
             Commands::Set { command } => match command {
                 SetCommand::Image { service, image } => {
@@ -1642,16 +1888,32 @@ impl Cli {
                 cordon::run_drain(client, name).await?;
             }
             Commands::Edit { resource, name } => {
-                let resource_str = resource.to_string();
-                edit::run(client, &resource_str, name).await?;
+                let resource = crate::cli::registry::resolve(&resource)?;
+                // Passed as the typed enum, not a stringified name: the string
+                // form could only ever reach the plural arms, leaving the
+                // singular ones unreachable.
+                edit::run(client, resource, name).await?;
             }
             Commands::Diff {
                 resource,
                 name,
                 filename,
             } => {
-                let resource_str = resource.to_string();
-                diff::run(client, &resource_str, name, filename).await?;
+                let resource = crate::cli::registry::resolve(&resource)?;
+                diff::run(client, resource, name, filename).await?;
+            }
+            Commands::Drift { output } => {
+                let endpoint =
+                    crate::api::endpoints::current_endpoint_key_with(cli.host.as_deref());
+                let code = drift::run(
+                    client,
+                    &endpoint,
+                    output.unwrap_or_else(|| cli.output.clone()),
+                )
+                .await?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
             }
             Commands::Patch {
                 resource,
@@ -1660,7 +1922,7 @@ impl Cli {
                 patch_type,
                 dry_run,
             } => {
-                let resource_str = resource.to_string();
+                let resource = crate::cli::registry::resolve(&resource)?;
                 let patch_content = if let Some(stripped) = patch.strip_prefix('@') {
                     std::fs::read_to_string(stripped)?
                 } else {
@@ -1668,7 +1930,7 @@ impl Cli {
                 };
                 patch::run(
                     client,
-                    &resource_str,
+                    resource,
                     name,
                     patch_content,
                     dry_run,
@@ -1689,14 +1951,8 @@ impl Cli {
                 timeout,
             } => {
                 // Reject unsupported kinds up front rather than after connecting.
-                let resource_str = resource.to_string();
-                if !wait::resource_type_supported(resource) {
-                    anyhow::bail!(
-                        "wait is not supported for {}; supported kinds: services, tasks, nodes",
-                        resource_str.to_lowercase()
-                    );
-                }
-                wait::run(client, &resource_str, name, condition, timeout).await?;
+                let resource = crate::cli::root::resolve_wait_resource(&resource)?;
+                wait::run(client, resource, name, condition, timeout).await?;
             }
             Commands::Stack { command } => match command {
                 StackCommand::Deploy { compose_file, name } => {
@@ -1711,7 +1967,7 @@ impl Cli {
             },
             Commands::Config { command } => match command {
                 ConfigCommand::Ls => {
-                    config::run_ls(client, cli.output).await?;
+                    config::run_ls(client, cli.output.clone()).await?;
                 }
                 ConfigCommand::Create {
                     name,
@@ -1724,7 +1980,7 @@ impl Cli {
                     config::run_rm(client, name).await?;
                 }
                 ConfigCommand::Inspect { name } => {
-                    config::run_inspect(client, name, cli.output).await?;
+                    config::run_inspect(client, name, cli.output.clone()).await?;
                 }
                 ConfigCommand::View { name } => {
                     config::run_view(client, name).await?;
@@ -1746,6 +2002,7 @@ impl Cli {
                 force,
                 output: replace_output,
             } => {
+                let resource = crate::cli::registry::resolve(&resource)?;
                 replace::run(
                     client,
                     resource,
@@ -1753,7 +2010,7 @@ impl Cli {
                     stdin,
                     dry_run,
                     force,
-                    replace_output.unwrap_or(cli.output),
+                    replace_output.unwrap_or_else(|| cli.output.clone()),
                 )
                 .await?;
             }
@@ -1763,10 +2020,10 @@ impl Cli {
                 resource,
                 output,
             } => {
+                let resource = crate::cli::root::resolve_diff_resource(&resource)?;
                 let registry = crate::api::endpoints::Registry::load()?;
                 let endpoints = registry.select(&[left, right])?;
-                let result =
-                    crate::api::diff::diff(&endpoints[0], &endpoints[1], resource.into()).await?;
+                let result = crate::api::diff::diff(&endpoints[0], &endpoints[1], resource).await?;
 
                 match output {
                     OutputFormat::Json => crate::utils::printer::print_json(&result)?,
@@ -1844,11 +2101,11 @@ impl Cli {
             }
             Commands::Volume { command } => match command {
                 VolumeCommand::Ls { output } => {
-                    let output = output.unwrap_or(cli.output);
+                    let output = output.unwrap_or_else(|| cli.output.clone());
                     volume::run_ls(client, output).await?;
                 }
                 VolumeCommand::Inspect { name, output } => {
-                    let output = output.unwrap_or(cli.output);
+                    let output = output.unwrap_or_else(|| cli.output.clone());
                     volume::run_inspect(client, name, output).await?;
                 }
                 VolumeCommand::Create {
@@ -1869,7 +2126,7 @@ impl Cli {
             },
             Commands::Failover { command } => match command {
                 FailoverCommand::Status { output } => {
-                    let output = output.unwrap_or(cli.output);
+                    let output = output.unwrap_or_else(|| cli.output.clone());
                     failover::run_status(client, output).await?;
                 }
                 FailoverCommand::Enable => {
@@ -1884,7 +2141,7 @@ impl Cli {
                     to,
                     output,
                 } => {
-                    let output = output.unwrap_or(cli.output);
+                    let output = output.unwrap_or_else(|| cli.output.clone());
                     failover::run_migrate(client, volume, from, to, output).await?;
                 }
             },
@@ -2056,6 +2313,7 @@ impl Cli {
                 | Commands::Failover { .. }
                 | Commands::Swarm { .. }
                 | Commands::Discover { .. }
+                | Commands::Drift { .. }
         )
     }
 }
@@ -2146,7 +2404,50 @@ mod tests {
             Cli::try_parse_from(["swarmctl", "--host", "tcp://10.0.0.1:2376", "get", "nodes"])
                 .is_ok()
         );
-        assert!(Cli::try_parse_from(["swarmctl", "-c", "prod", "get", "nodes"]).is_ok());
+        // `--context` is global under its long name. `-c` is deliberately not:
+        // `stack deploy -c` already owns that short, and a global short must be
+        // unique across every subcommand.
+        assert!(Cli::try_parse_from(["swarmctl", "--context", "prod", "get", "nodes"]).is_ok());
+        assert!(Cli::try_parse_from(["swarmctl", "get", "nodes", "--context", "prod"]).is_ok());
+        // The long form must survive a subcommand that has its own positionals.
+        assert!(
+            Cli::try_parse_from([
+                "swarmctl",
+                "delete",
+                "services",
+                "web",
+                "--host",
+                "tcp://10.0.0.1:2376"
+            ])
+            .is_ok()
+        );
+    }
+
+    /// The bug this pins: `--host` written before a subcommand that takes a
+    /// positional NAME used to bind the host string to that positional, so
+    /// `swarmctl --host ssh://x delete services web` tried to delete a service
+    /// literally named `ssh://x`.
+    #[test]
+    fn a_global_host_does_not_consume_a_positional_name() {
+        let cli = Cli::try_parse_from([
+            "swarmctl",
+            "--host",
+            "ssh://zev",
+            "delete",
+            "services",
+            "web",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Commands::Delete { name, .. } => {
+                assert_eq!(
+                    name.as_deref(),
+                    Some("web"),
+                    "the host must not become the name"
+                );
+            }
+            _ => panic!("expected Delete"),
+        }
     }
 
     #[test]
@@ -2383,11 +2684,13 @@ mod tests {
             );
         }
         assert!(Cli::try_parse_from(["swarmctl", "diff-clusters", "a"]).is_err());
+        // Tasks are rejected by the resolver rather than by clap, since
+        // `--resource` is now a plain token.
         assert!(
-            Cli::try_parse_from(["swarmctl", "diff-clusters", "a", "b", "--resource", "tasks"])
-                .is_err(),
-            "tasks are not comparable, so clap should not offer them"
+            crate::cli::root::resolve_diff_resource("tasks").is_err(),
+            "tasks are not comparable across clusters"
         );
+        assert!(crate::cli::root::resolve_diff_resource("services").is_ok());
     }
 
     #[test]
@@ -2420,37 +2723,103 @@ mod tests {
         );
     }
 
-    /// `explain` and `api-resources` share one resource list, and it must cover
-    /// every resource the parser accepts — otherwise `get <kind>` works while
-    /// `explain <kind>` does not.
+    /// `explain` and `api-resources` read the registry, so they can no longer
+    /// drift from what the parser accepts. This asserts the invariant that the
+    /// registry is the single source of truth.
     #[test]
-    fn documented_resources_cover_every_resource_type() {
+    fn explain_and_api_resources_come_from_the_registry() {
         use crate::cli::explain;
-        use crate::cli::root::ResourceType;
+        use crate::cli::registry;
 
-        let documented: Vec<&str> = explain::SHORT_NAMES.iter().map(|(n, _)| *n).collect();
-
-        for r in [
-            ResourceType::Nodes,
-            ResourceType::Services,
-            ResourceType::Tasks,
-            ResourceType::Networks,
-            ResourceType::Secrets,
-            ResourceType::Configs,
-            ResourceType::Stacks,
-        ] {
-            let name = format!("{:?}", r).to_lowercase();
+        for info in registry::REGISTRY {
             assert!(
-                documented.contains(&name.as_str()),
-                "{:?} is missing from explain / api-resources",
-                r
+                !info.plural.is_empty(),
+                "{:?} has no plural name",
+                info.resource
             );
+            assert!(!info.singular.is_empty(), "{} has no singular", info.plural);
+            assert!(
+                !info.short_names.is_empty(),
+                "{} has no short name",
+                info.plural
+            );
+            for short in info.short_names {
+                assert!(!short.contains(' '), "{short} contains a space");
+            }
+            // Every spelling must round-trip through the resolver.
+            for spelling in registry::all_spellings_for(info) {
+                assert_eq!(
+                    registry::resolve(spelling).unwrap(),
+                    info.resource,
+                    "{spelling} did not resolve back"
+                );
+            }
+            for short in info.short_names {
+                assert_eq!(registry::resolve(short).unwrap(), info.resource);
+            }
+            assert!(!explain::fields_for(info.resource).is_empty());
         }
+    }
 
-        for (name, short) in explain::SHORT_NAMES {
-            assert!(!short.is_empty(), "{} has no short name", name);
-            assert!(!short.contains(' '), "{}'s short name has a space", name);
+    /// Every spelling the registry advertises must actually work on the CLI.
+    #[test]
+    fn every_documented_spelling_parses() {
+        use crate::cli::registry;
+
+        for spelling in registry::all_spellings() {
+            let argv = vec!["swarmctl", "get", spelling];
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("`get {spelling}` should parse: {e}"));
+            match cli.command {
+                Commands::Get { resource, .. } => {
+                    let parsed = registry::parse_request(&resource, &[], "v1.52")
+                        .unwrap_or_else(|e| panic!("`get {spelling}` failed to resolve: {e}"));
+                    assert_eq!(parsed.len(), 1);
+                }
+                _ => panic!("expected a Get command"),
+            }
         }
+    }
+
+    /// `--context` and `--host` used to be accepted together with the host
+    /// silently discarded. They are now a hard conflict.
+    #[test]
+    fn context_and_host_together_are_a_conflict() {
+        let err =
+            crate::cli::root::connection_conflict(Some("prod"), Some("tcp://10.0.0.1:2375"), false)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("cannot combine"), "{err}");
+        assert!(err.contains("prod"), "{err}");
+    }
+
+    #[test]
+    fn context_alone_is_not_a_conflict() {
+        assert!(crate::cli::root::connection_conflict(Some("prod"), None, false).is_ok());
+        assert!(crate::cli::root::connection_conflict(None, Some("tcp://x"), false).is_ok());
+        assert!(crate::cli::root::connection_conflict(None, None, true).is_ok());
+    }
+
+    /// `logs` and `wait` narrow the shared registry rather than carrying their
+    /// own duplicate alias lists.
+    #[test]
+    fn logs_and_wait_narrow_the_shared_registry() {
+        use crate::cli::root::{resolve_log_resource, resolve_wait_resource};
+
+        for alias in ["svc", "services", "service", "po", "tasks", "no", "nodes"] {
+            assert!(resolve_wait_resource(alias).is_ok(), "wait {alias}");
+        }
+        for alias in ["svc", "services", "service", "po", "tasks"] {
+            assert!(resolve_log_resource(alias).is_ok(), "logs {alias}");
+        }
+        assert!(
+            resolve_log_resource("net").is_err(),
+            "logs must reject networks"
+        );
+        assert!(
+            resolve_wait_resource("net").is_err(),
+            "wait must reject networks"
+        );
     }
 
     #[test]
@@ -2490,5 +2859,45 @@ mod tests {
         }
         // Ensure the enum stays exercised so new variants get classified.
         let _ = std::mem::discriminant(&Commands::Version);
+    }
+
+    /// `-v` used to be declared, parsed and read nowhere, so `-vv` did nothing
+    /// and env_logger's `error` default hid every warning the codebase emits.
+    #[test]
+    fn verbosity_flags_are_counted_before_parsing() {
+        let v = |args: &[&str]| Cli::verbose_count(args.iter().map(|s| s.to_string()));
+
+        assert_eq!(v(&[]), 0);
+        assert_eq!(v(&["-v"]), 1);
+        assert_eq!(v(&["-vv"]), 2);
+        assert_eq!(v(&["-vvv"]), 3);
+        assert_eq!(v(&["--verbose"]), 1);
+        // `=value` is not accepted by clap's Count action, so it must not be
+        // counted as verbosity either.
+        assert_eq!(v(&["--verbose=vv"]), 0);
+
+        // Anywhere in the command line, including after the subcommand.
+        assert_eq!(v(&["get", "services", "-vv"]), 2);
+        assert_eq!(v(&["-v", "get", "services", "-v"]), 2);
+
+        // Unrelated arguments contribute nothing.
+        assert_eq!(v(&["get", "services", "-o", "json"]), 0);
+        assert_eq!(v(&["get", "services", "--watch"]), 0);
+        assert_eq!(v(&["-y"]), 0);
+        assert_eq!(v(&["-w"]), 0);
+    }
+
+    #[test]
+    fn verbose_is_accepted_in_either_position() {
+        for argv in [
+            vec!["swarmctl", "-vv", "get", "services"],
+            vec!["swarmctl", "get", "services", "-vv"],
+            vec!["swarmctl", "--verbose", "get", "services"],
+        ] {
+            let cli =
+                Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} should parse: {e}"));
+            let expected: u8 = argv.iter().map(|a| Cli::count_verbosity_in_arg(a)).sum();
+            assert_eq!(cli.verbose, expected, "{argv:?}");
+        }
     }
 }

@@ -1,5 +1,5 @@
 use crate::api::client::DockerClient;
-use crate::cli::root::LogResourceType;
+use crate::cli::registry::ResourceType;
 use futures::StreamExt;
 
 /// Flags accepted by both the service and task log handlers.
@@ -16,13 +16,15 @@ pub struct LogOptions {
 
 pub async fn run(
     client: &DockerClient,
-    resource: LogResourceType,
+    resource: ResourceType,
     name: String,
     opts: LogOptions,
 ) -> anyhow::Result<()> {
     match resource {
-        LogResourceType::Service => logs_service(client, name, opts).await?,
-        LogResourceType::Task => logs_task(client, name, opts).await?,
+        ResourceType::Services => logs_service(client, name, opts).await?,
+        ResourceType::Tasks => logs_task(client, name, opts).await?,
+        // `resolve_log_resource` rejects these before we get here.
+        _ => unreachable!("logs resource narrowed to services and tasks"),
     }
 
     Ok(())
