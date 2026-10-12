@@ -27,3 +27,6 @@ async fn main() -> anyhow::Result<()> {
 
     Cli::run().await
 }
+
+// deliberate break
+fn broken() { let _: i32 = "not an int"; }
